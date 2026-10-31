@@ -20,7 +20,28 @@ def verify_password(encoded: str, password: str) -> bool:
 def issue_session(user: User, db: Session, response: Response):
     raw = secrets.token_urlsafe(32)
     db.add(SessionRecord(token_hash=digest(raw), user_id=user.id, expires_at=datetime.now(timezone.utc)+timedelta(days=settings.session_days)))
-    response.set_cookie(COOKIE, raw, httponly=True, secure=settings.cookie_secure, samesite="lax", max_age=settings.session_days*86400, path="/")
+    samesite_mode = settings.cookie_samesite.lower()
+    is_secure = settings.cookie_secure or (samesite_mode == "none")
+    response.set_cookie(
+        COOKIE,
+        raw,
+        httponly=True,
+        secure=is_secure,
+        samesite=samesite_mode,
+        max_age=settings.session_days * 86400,
+        path="/"
+    )
+
+def clear_session_cookie(response: Response):
+    samesite_mode = settings.cookie_samesite.lower()
+    is_secure = settings.cookie_secure or (samesite_mode == "none")
+    response.delete_cookie(
+        COOKIE,
+        path="/",
+        httponly=True,
+        secure=is_secure,
+        samesite=samesite_mode
+    )
 def current_user(request: Request, db: Session = Depends(get_db)) -> User:
     raw = request.cookies.get(COOKIE)
     if not raw: raise HTTPException(401, "Authentication required")

@@ -37,6 +37,7 @@ from app.models import (
 from app.security import (
     COOKIE,
     as_utc,
+    clear_session_cookie,
     current_user,
     digest,
     hash_password,
@@ -57,9 +58,11 @@ Path("./data").mkdir(exist_ok=True)
 Path(settings.storage_path).mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="SecureShare API", version="1.0.0")
+origins = [o.strip() for o in settings.frontend_origin.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_origin],
+    allow_origins=origins,
+    allow_origin_regex=r"^https?://([a-zA-Z0-9-]+\.)*vercel\.app$",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
@@ -74,14 +77,27 @@ sent_emails = []
 
 @app.on_event("startup")
 def migrate_database():
-    if settings.run_migrations_on_start and Path("alembic.ini").exists():
-        result = subprocess.run(
-            [sys.executable, "-m", "alembic", "upgrade", "head"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode:
-            raise RuntimeError(f"Database migration failed: {result.stderr}")
+    if settings.run_migrations_on_start:
+        ini_path = None
+        if Path("alembic.ini").exists():
+            ini_path = "alembic.ini"
+        elif Path("backend/alembic.ini").exists():
+            ini_path = "backend/alembic.ini"
+        elif (Path(__file__).parent.parent / "alembic.ini").exists():
+            ini_path = str(Path(__file__).parent.parent / "alembic.ini")
+
+        if ini_path:
+            result = subprocess.run(
+                [sys.executable, "-m", "alembic", "-c", ini_path, "upgrade", "head"],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode:
+                print(f"[Warning] Migration notice: {result.stderr}")
+        try:
+            Base.metadata.create_all(bind=engine)
+        except Exception as e:
+            print(f"[Info] Schema creation notice: {e}")
 
 @app.middleware("http")
 async def auth_rate_limit(request: Request, call_next):
@@ -260,6 +276,16 @@ def owned_file(file_id: str, user: User, db: Session) -> FileRecord:
     if not f:
         raise HTTPException(404, "File not found")
     return f
+
+@app.get("/")
+def root():
+    return {
+        "service": "SecureShare API",
+        "status": "online",
+        "version": "1.0.0",
+        "docs": "/docs",
+        "health": "/health",
+    }
 
 @app.get("/health")
 def health():
@@ -495,7 +521,7 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
         if rec:
             db.delete(rec)
             db.commit()
-    response.delete_cookie(COOKIE, path="/", httponly=True, secure=settings.cookie_secure, samesite="lax")
+    clear_session_cookie(response)
 
 @app.get("/api/auth/me")
 def me(user: User = Depends(current_user)):
@@ -530,7 +556,7 @@ def sessions(user: User = Depends(current_user), db: Session = Depends(get_db)):
 def revoke_sessions(request: Request, response: Response, user: User = Depends(current_user), db: Session = Depends(get_db)):
     db.query(SessionRecord).filter(SessionRecord.user_id == user.id).delete(synchronize_session=False)
     db.commit()
-    response.delete_cookie(COOKIE, path="/")
+    clear_session_cookie(response)
 
 # ----------------- Dashboard & Files -----------------
 

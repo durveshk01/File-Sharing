@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: secureshare-api
+    runtime: python
+    plan: free
+    region: oregon
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: APP_SECRET
+        generateValue: true
+      - key: KEK_BASE64
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: secureshare-db
+          property: connectionString
+      - key: STORAGE_BACKEND
+        value: local
+      - key: STORAGE_PATH
+        value: ./storage
+      - key: FRONTEND_ORIGIN
+        value: https://secureshare-frontend.vercel.app
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: COOKIE_SAMESITE
+        value: none
+      - key: RUN_MIGRATIONS_ON_START
+        value: "true"
+      - key: DEMO_LOGIN_ENABLED
+        value: "true"
+
+databases:
+  - name: secureshare-db
+    plan: free
+    region: oregon
+    databaseName: secureshare
+    user: secureshare_user

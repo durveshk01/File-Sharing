@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     
     frontend_origin: str = "http://localhost:3000"
     cookie_secure: bool = False
+    cookie_samesite: str = "lax"
     session_days: int = 7
     max_upload_bytes: int = 50 * 1024 * 1024  # 50 MB
     
@@ -32,6 +33,16 @@ class Settings(BaseSettings):
     
     run_migrations_on_start: bool = True
     demo_login_enabled: bool = True
+
+    @property
+    def normalized_database_url(self) -> str:
+        url = self.database_url
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql+psycopg://", 1)
+        elif url.startswith("postgresql://") and not url.startswith("postgresql+"):
+            url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+        return url
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 settings = Settings()

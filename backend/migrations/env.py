@@ -9,7 +9,11 @@ config = context.config
 # Use existing config URL if explicitly provided (e.g. in tests/CLI), otherwise fallback to settings.database_url
 db_url = config.get_main_option("sqlalchemy.url")
 if not db_url or db_url.startswith("sqlite:///./data/secureshare.db"):
-    db_url = settings.database_url
+    db_url = settings.normalized_database_url
+elif db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql+psycopg://", 1)
+elif db_url.startswith("postgresql://") and not db_url.startswith("postgresql+"):
+    db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
 config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
 
 if config.config_file_name:
