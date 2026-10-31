@@ -25,7 +25,7 @@ services:
       - key: STORAGE_PATH
         value: ./storage
       - key: FRONTEND_ORIGIN
-        value: https://secureshare-frontend.vercel.app
+        value: https://frontend-five-fawn-27.vercel.app
       - key: COOKIE_SECURE
         value: "true"
       - key: COOKIE_SAMESITE

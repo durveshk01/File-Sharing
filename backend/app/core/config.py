@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     s3_access_key_id: str = ""
     s3_secret_access_key: str = ""
     
-    frontend_origin: str = "http://localhost:3000"
+    frontend_origin: str = "http://localhost:3000,https://frontend-five-fawn-27.vercel.app"
     cookie_secure: bool = False
     cookie_samesite: str = "lax"
     session_days: int = 7
