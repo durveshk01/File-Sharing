@@ -1,5 +1,7 @@
 # SecureShare — Device-Powered Zero-Knowledge Secure File Platform
 
+[![Latest Release](https://img.shields.io/github/v/release/durveshk01/File-Sharing?color=blue&label=Release)](https://github.com/durveshk01/File-Sharing/releases/latest)
+[![Download APK](https://img.shields.io/badge/Download-Android%20APK-brightgreen?logo=android)](https://github.com/durveshk01/File-Sharing/releases/download/v1.0.0/app-release.apk)
 [![CI Pipeline](https://github.com/durveshk01/File-Sharing/actions/workflows/ci.yml/badge.svg)](https://github.com/durveshk01/File-Sharing/actions)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688.svg)](https://fastapi.tiangolo.com/)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org/)
@@ -10,6 +12,10 @@
 
 > **"Your Files. Your Privacy. Processed on Your Device."**  
 > SecureShare is a commercial-grade, **zero-knowledge, mobile-first** secure file-sharing and encrypted synchronization platform. All heavy cryptographic operations—file reading, AES-256-GCM encryption, SHA-256 integrity hashing, and decryption—are executed **exclusively on the user's client device**. Render acts strictly as a lightweight metadata index, authentication gateway, and synchronization coordinator.
+
+📱 **Download Latest Android APK**: [**`app-release.apk` (v1.0.0)**](https://github.com/durveshk01/File-Sharing/releases/download/v1.0.0/app-release.apk)  
+🌐 **Live Web Application**: [**https://frontend-five-fawn-27.vercel.app**](https://frontend-five-fawn-27.vercel.app)  
+📦 **GitHub Release**: [**SecureShare v1.0.0 Release Notes**](https://github.com/durveshk01/File-Sharing/releases/tag/v1.0.0)
 
 ---
 
