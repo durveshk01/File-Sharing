@@ -6,34 +6,43 @@ import Link from 'next/link';
 import {
   Activity,
   ArrowDownToLine,
-  ArrowUpFromLine,
-  File,
+  Check,
+  ChevronRight,
+  Clock,
+  Cloud,
+  Copy,
+  ExternalLink,
+  Eye,
+  FileArchive,
+  FileCode,
+  FileText,
   Files,
   FolderOpen,
+  FolderPlus,
   Gauge,
-  Link2,
+  HardDrive,
+  Image as ImageIcon,
+  KeyRound,
+  Layers,
   LockKeyhole,
   LogOut,
   Plus,
+  RefreshCw,
+  Search,
   Settings,
-  ShieldCheck,
   Share2,
+  ShieldCheck,
+  Smartphone,
+  Sparkles,
+  Star,
   Trash2,
   UploadCloud,
-  Copy,
-  Check,
-  Eye,
-  KeyRound,
-  Clock,
-  Search,
   X,
-  FileText,
-  FileCode,
-  FileArchive,
-  Image as ImageIcon
+  Zap
 } from 'lucide-react';
-
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+import { apiRequest, API_URL, setAuthToken } from '../lib/api';
+import { uploadDeviceEncryptedFile, getLocalFileKey, UploadProgress } from '../lib/uploader';
+import { downloadAndDecryptFile } from '../lib/downloader';
 
 type F = {
   id: string;
@@ -41,23 +50,20 @@ type F = {
   size: number;
   content_type: string;
   sha256_checksum?: string;
+  ciphertext_sha256?: string;
+  version?: number;
+  encryption_version?: string;
+  is_deleted?: boolean;
   created_at: string;
 };
 
-type D = {
-  stats: {
-    files: number;
-    shared_files: number;
-    active_links: number;
-    downloads: number;
-    storage_bytes: number;
-  };
-  files: F[];
-  activity: {
-    action: string;
-    detail: string;
-    created_at: string;
-  }[];
+type SyncStatus = {
+  active_files_count: number;
+  trashed_files_count: number;
+  total_bytes_used: number;
+  quota_bytes: number;
+  registered_devices_count: number;
+  server_time: string;
 };
 
 const fmt = (n: number) =>
@@ -69,22 +75,30 @@ const fmt = (n: number) =>
 
 function getFileIcon(name: string) {
   const ext = name.split('.').pop()?.toLowerCase();
-  if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(ext || '')) return <ImageIcon size={15} />;
-  if (['zip', 'tar', 'gz', '7z', 'rar'].includes(ext || '')) return <FileArchive size={15} />;
-  if (['js', 'ts', 'py', 'json', 'html', 'css'].includes(ext || '')) return <FileCode size={15} />;
-  return <FileText size={15} />;
+  if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(ext || '')) return <ImageIcon size={16} className="text-emerald-400" />;
+  if (['zip', 'tar', 'gz', '7z', 'rar'].includes(ext || '')) return <FileArchive size={16} className="text-amber-400" />;
+  if (['js', 'ts', 'py', 'json', 'html', 'css', 'sql'].includes(ext || '')) return <FileCode size={16} className="text-blue-400" />;
+  return <FileText size={16} className="text-indigo-400" />;
 }
 
 export default function Dashboard() {
-  const [data, setData] = useState<D | null>(null);
+  const router = useRouter();
   const [user, setUser] = useState<{ name: string; email: string } | null>(null);
+  const [files, setFiles] = useState<F[]>([]);
+  const [activities, setActivities] = useState<any[]>([]);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
   const [search, setSearch] = useState('');
   const [dragActive, setDragActive] = useState(false);
-  const router = useRouter();
 
-  // Share Modal State
+  // Device-Powered Upload State
+  const [uploadQueue, setUploadQueue] = useState<
+    { name: string; size: number; progress: UploadProgress }[]
+  >([]);
+  const [uploading, setUploading] = useState(false);
+
+  // Sharing Modal
   const [shareFile, setShareFile] = useState<F | null>(null);
   const [expiresHours, setExpiresHours] = useState('24');
   const [maxDownloads, setMaxDownloads] = useState('10');
@@ -93,57 +107,71 @@ export default function Dashboard() {
   const [copied, setCopied] = useState(false);
   const [shareBusy, setShareBusy] = useState(false);
 
-  async function load() {
-    const [u, d] = await Promise.all([
-      fetch(`${API}/api/auth/me`, { credentials: 'include' }),
-      fetch(`${API}/api/dashboard`, { credentials: 'include' }),
-    ]);
-    if (u.status === 401) {
-      router.replace('/login');
-      return;
+  // Inspector Drawer
+  const [inspectFile, setInspectFile] = useState<F | null>(null);
+  const [downloadStatus, setDownloadStatus] = useState('');
+
+  async function loadDashboard() {
+    try {
+      const [u, fList, act, sync] = await Promise.all([
+        apiRequest('/api/auth/me'),
+        apiRequest('/api/files'),
+        apiRequest('/api/dashboard'),
+        apiRequest('/api/sync/status').catch(() => null),
+      ]);
+      setUser(u);
+      setFiles(fList);
+      setActivities(act.activity || []);
+      setSyncStatus(sync);
+    } catch (err: any) {
+      if (err.message?.includes('401') || err.message?.includes('Authentication required')) {
+        router.replace('/login');
+        return;
+      }
+      setError(err.message || 'Error loading dashboard');
+    } finally {
+      setLoading(false);
     }
-    if (!d.ok) {
-      setError('Could not load dashboard data');
-      return;
-    }
-    setUser(await u.json());
-    setData(await d.json());
   }
 
   useEffect(() => {
-    load();
+    loadDashboard();
   }, []);
 
   async function handleFilesUpload(fileList: File[]) {
     if (!fileList.length) return;
-    setBusy(true);
+    setUploading(true);
     setError('');
-    try {
-      for (const f of fileList) {
-        const body = new FormData();
-        body.append('file', f);
-        const r = await fetch(`${API}/api/files`, {
-          method: 'POST',
-          body,
-          credentials: 'include',
-        });
-        if (!r.ok) {
-          const b = await r.json();
-          throw new Error(b.detail || `Could not upload ${f.name}`);
-        }
-      }
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Upload failed');
-    } finally {
-      setBusy(false);
-    }
-  }
 
-  async function onFileInput(e: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files || []);
-    await handleFilesUpload(files);
-    e.target.value = '';
+    for (const file of fileList) {
+      const queueItem = {
+        name: file.name,
+        size: file.size,
+        progress: {
+          phase: 'reading' as const,
+          loaded: 0,
+          total: file.size,
+          percent: 0,
+          speedBytesPerSec: 0,
+          etaSeconds: 0,
+        },
+      };
+
+      setUploadQueue((prev) => [queueItem, ...prev]);
+
+      try {
+        await uploadDeviceEncryptedFile(file, (p) => {
+          setUploadQueue((prev) =>
+            prev.map((item) => (item.name === file.name ? { ...item, progress: p } : item))
+          );
+        });
+      } catch (err: any) {
+        setError(`Upload failed for ${file.name}: ${err.message}`);
+      }
+    }
+
+    setUploading(false);
+    await loadDashboard();
   }
 
   function handleDrag(e: DragEvent) {
@@ -181,461 +209,518 @@ export default function Dashboard() {
         payload.password = sharePassword.trim();
       }
 
-      const r = await fetch(`${API}/api/files/${shareFile.id}/shares`, {
+      const res = await apiRequest(`/api/files/${shareFile.id}/shares`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-        credentials: 'include',
       });
-      const b = await r.json();
-      if (!r.ok) throw new Error(b.detail || 'Could not generate share link');
-      setGeneratedLink(b.url);
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Error creating share link');
+
+      let shareUrl = res.url;
+      // Append zero-knowledge decryption key fragment if available on this device
+      const localKey = getLocalFileKey(shareFile.id);
+      if (localKey) {
+        shareUrl += `#key=${localKey}`;
+      }
+
+      setGeneratedLink(shareUrl);
+      await loadDashboard();
+    } catch (err: any) {
+      setError(err.message || 'Error creating share link');
     } finally {
       setShareBusy(false);
     }
   }
 
-  async function copyToClipboard() {
-    if (!generatedLink) return;
-    await navigator.clipboard.writeText(generatedLink);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  async function handleDownload(f: F) {
+    setDownloadStatus('Preparing download...');
+    try {
+      await downloadAndDecryptFile(f.id, (pct, status) => {
+        setDownloadStatus(`${status} (${pct}%)`);
+      });
+      setTimeout(() => setDownloadStatus(''), 2000);
+    } catch (err: any) {
+      alert(`Download failed: ${err.message}`);
+      setDownloadStatus('');
+    }
   }
 
-  async function remove(f: F) {
-    if (!confirm(`Permanently delete "${f.name}"? This will also revoke any active sharing links.`)) return;
-    const r = await fetch(`${API}/api/files/${f.id}`, {
-      method: 'DELETE',
-      credentials: 'include',
-    });
-    if (r.ok) load();
-    else setError('Could not delete file');
+  async function handleTrash(f: F) {
+    if (!confirm(`Move "${f.name}" to trash?`)) return;
+    try {
+      await apiRequest(`/api/files/${f.id}/trash`, { method: 'POST' });
+      await loadDashboard();
+    } catch (err: any) {
+      setError(err.message || 'Could not move file to trash');
+    }
   }
 
   async function logout() {
-    await fetch(`${API}/api/auth/logout`, { method: 'POST', credentials: 'include' });
+    try {
+      await apiRequest('/api/auth/logout', { method: 'POST' });
+    } catch {}
+    setAuthToken(null);
     router.replace('/');
   }
 
-  if (!data) return <div className="empty">{error || 'Loading your secure workspace…'}</div>;
-
-  const filteredFiles = data.files.filter((f) =>
+  const filteredFiles = files.filter((f) =>
     f.name.toLowerCase().includes(search.toLowerCase())
   );
 
-  const stats = [
-    ['Stored Files', data.stats.files, Files],
-    ['Shared Files', data.stats.shared_files, Share2],
-    ['Active Links', data.stats.active_links, Link2],
-    ['Downloads', data.stats.downloads, ArrowDownToLine],
-  ] as const;
-
-  const storageQuota = 50 * 1024 * 1024; // 50MB default
-  const usedPercent = Math.min(100, Math.round((data.stats.storage_bytes / storageQuota) * 100));
+  const totalUsedBytes = syncStatus?.total_bytes_used || files.reduce((acc, f) => acc + f.size, 0);
+  const quotaBytes = syncStatus?.quota_bytes || 1024 * 1024 * 1024; // 1GB
+  const storagePercent = Math.min(Math.round((totalUsedBytes / quotaBytes) * 100), 100);
 
   return (
     <div className="app-shell">
-      {/* Sidebar Navigation */}
+      {/* 1. Sidebar Navigation */}
       <aside className="sidebar">
-        <Link className="brand" href="/">
-          <span className="brand-mark">
-            <LockKeyhole size={17} />
-          </span>
-          SecureShare
+        <Link href="/" className="brand-wrap" style={{ padding: '4px 12px 20px' }}>
+          <div className="brand-icon-box">
+            <LockKeyhole size={18} />
+          </div>
+          <span>SecureShare</span>
         </Link>
 
-        <div className="side-label">WORKSPACE</div>
+        <div className="side-section-label">WORKSPACE</div>
         <Link className="side-item active" href="/dashboard">
-          <Gauge size={16} />
-          Overview
+          <Gauge size={16} /> Overview
         </Link>
         <Link className="side-item" href="/files">
-          <Files size={16} />
-          All Files
+          <Files size={16} /> All Files
         </Link>
         <Link className="side-item" href="/shared">
-          <Share2 size={16} />
-          Sharing Links
+          <Share2 size={16} /> Sharing Links
         </Link>
         <Link className="side-item" href="/access-logs">
-          <Activity size={16} />
-          Audit Logs
+          <Activity size={16} /> Audit Trail
         </Link>
         <Link className="side-item" href="/notifications">
-          <ShieldCheck size={16} />
-          Notifications
+          <ShieldCheck size={16} /> Notifications
         </Link>
 
-        <div className="side-label">SECURITY & PREFERENCES</div>
+        <div className="side-section-label">STORAGE & SYNC</div>
+        <div style={{ padding: '10px 12px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
+            <span>Cloud Storage</span>
+            <span>{storagePercent}%</span>
+          </div>
+          <div className="progress-track" style={{ height: 5 }}>
+            <div className="progress-fill" style={{ width: `${storagePercent}%` }} />
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 6 }}>
+            {fmt(totalUsedBytes)} of {fmt(quotaBytes)}
+          </div>
+        </div>
+
+        <div className="side-section-label">ACCOUNT</div>
         <Link className="side-item" href="/security">
-          <KeyRound size={16} />
-          Security & 2FA
+          <KeyRound size={16} /> Security & 2FA
         </Link>
         <Link className="side-item" href="/settings">
-          <Settings size={16} />
-          Settings
+          <Settings size={16} /> Settings
         </Link>
 
-        <div className="sidebar-bottom">
-          <div style={{ padding: '0 10px 12px', fontSize: 11, color: '#94a3b8' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-              <span>Storage Used</span>
-              <span>{fmt(data.stats.storage_bytes)}</span>
-            </div>
-            <div style={{ background: '#334155', borderRadius: 4, height: 4, overflow: 'hidden' }}>
-              <div style={{ background: '#38bdf8', height: '100%', width: `${usedPercent}%` }}></div>
-            </div>
+        <div className="side-bottom">
+          <div style={{ padding: '0 12px 10px', fontSize: 12 }}>
+            <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{user?.name || 'Loading...'}</div>
+            <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>{user?.email}</div>
           </div>
           <button
-            className="side-item"
             onClick={logout}
-            style={{ width: '100%', background: 'none', border: 0, textAlign: 'left', cursor: 'pointer' }}
+            className="side-item"
+            style={{ width: '100%', background: 'none', border: 0, cursor: 'pointer', textAlign: 'left' }}
           >
-            <LogOut size={16} />
-            Sign Out
+            <LogOut size={16} /> Sign Out
           </button>
         </div>
       </aside>
 
-      {/* Main Content Area */}
+      {/* 2. Main Dashboard Area */}
       <main className="dash-main">
-        <header className="dash-top">
-          <strong>Secure Workspace</strong>
-          <span>
-            {user?.name || 'Authorized User'} <b> · </b> {user?.email}
-          </span>
-        </header>
-
-        <div className="dash-content">
-          <div className="dash-heading">
-            <div>
-              <h1>Welcome back, {user?.name?.split(' ')[0] || 'User'}.</h1>
-              <p>Your protected files, active sharing links, and tamper verification status.</p>
+        {/* Top Header */}
+        <header className="dash-header">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1, maxWidth: 480 }}>
+            <div style={{ position: 'relative', width: '100%' }}>
+              <Search size={15} style={{ position: 'absolute', left: 12, top: 11, color: 'var(--text-muted)' }} />
+              <input
+                type="text"
+                placeholder="Search encrypted files... (⌘K)"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                style={{
+                  width: '100%',
+                  height: 38,
+                  paddingLeft: 36,
+                  paddingRight: 12,
+                  background: 'var(--surface-raised)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-sm)',
+                  color: 'var(--text-primary)',
+                  fontSize: 13,
+                  outline: 'none',
+                }}
+              />
             </div>
-            <label className="button" style={{ cursor: 'pointer' }}>
-              <Plus size={16} /> Upload & Encrypt
-              <input type="file" multiple hidden onChange={onFileInput} />
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#34d399', background: 'rgba(52, 211, 153, 0.1)', padding: '5px 10px', borderRadius: 6 }}>
+              <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#34d399' }} />
+              <span>Device-Powered</span>
+            </div>
+
+            <label className="btn-primary btn-sm" style={{ cursor: 'pointer', margin: 0 }}>
+              <Plus size={15} /> Upload Encrypted
+              <input type="file" multiple onChange={(e) => handleFilesUpload(Array.from(e.target.files || []))} style={{ display: 'none' }} />
             </label>
           </div>
+        </header>
 
-          {error && <div className="auth-error" style={{ marginBottom: 18 }}>{error}</div>}
+        {/* Dashboard Body Content */}
+        <div className="dash-content">
+          {error && (
+            <div style={{ background: 'rgba(239, 68, 68, 0.15)', border: '1px solid #ef4444', borderRadius: 8, padding: '12px 16px', color: '#f87171', fontSize: 13, marginBottom: 20 }}>
+              {error}
+            </div>
+          )}
 
-          {/* Metric Cards */}
-          <div className="stats">
-            {stats.map(([label, val, Icon]) => (
-              <div className="stat" key={label}>
-                <div className="stat-head">
-                  {label}
-                  <span className="stat-icon">
-                    <Icon size={15} />
-                  </span>
-                </div>
-                <strong>{val}</strong>
-                <small>
-                  {label === 'Stored Files'
-                    ? `${fmt(data.stats.storage_bytes)} encrypted`
-                    : label === 'Active Links'
-                    ? 'Ready to share'
-                    : 'Recorded all time'}
-                </small>
+          {downloadStatus && (
+            <div style={{ background: 'rgba(59, 130, 246, 0.15)', border: '1px solid #3b82f6', borderRadius: 8, padding: '12px 16px', color: '#60a5fa', fontSize: 13, marginBottom: 20, display: 'flex', alignItems: 'center', gap: 10 }}>
+              <RefreshCw size={15} className="animate-spin" />
+              <span>{downloadStatus}</span>
+            </div>
+          )}
+
+          {/* Quick Stats Grid */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16, marginBottom: 28 }}>
+            <div className="card">
+              <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: 12, marginBottom: 8 }}>
+                <span>ENCRYPTED OBJECTS</span>
+                <Files size={16} className="text-blue-400" />
               </div>
-            ))}
+              <div style={{ fontSize: 26, fontWeight: 800 }}>{files.length}</div>
+              <div style={{ fontSize: 11, color: '#34d399', marginTop: 4 }}>100% Client-side AES-256-GCM</div>
+            </div>
+
+            <div className="card">
+              <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: 12, marginBottom: 8 }}>
+                <span>CLOUD STORAGE USED</span>
+                <Cloud size={16} className="text-emerald-400" />
+              </div>
+              <div style={{ fontSize: 26, fontWeight: 800 }}>{fmt(totalUsedBytes)}</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>Private S3 Presigned Vault</div>
+            </div>
+
+            <div className="card">
+              <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: 12, marginBottom: 8 }}>
+                <span>SYNCED DEVICES</span>
+                <Smartphone size={16} className="text-amber-400" />
+              </div>
+              <div style={{ fontSize: 26, fontWeight: 800 }}>{syncStatus?.registered_devices_count || 1}</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>Delta Sync Cursor Active</div>
+            </div>
+
+            <div className="card">
+              <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: 12, marginBottom: 8 }}>
+                <span>SECURITY ARCHITECTURE</span>
+                <Zap size={16} className="text-indigo-400" />
+              </div>
+              <div style={{ fontSize: 18, fontWeight: 700, marginTop: 4 }}>Zero-Knowledge</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>Render Coordinates Only</div>
+            </div>
           </div>
+
+          {/* Active Upload Queue (if any) */}
+          {uploadQueue.length > 0 && (
+            <div className="card" style={{ marginBottom: 24, padding: 18, border: '1px solid var(--border-subtle)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700 }}>
+                  <UploadCloud size={16} className="text-blue-400" />
+                  <span>Device Processing & Upload Pipeline</span>
+                </div>
+                <button onClick={() => setUploadQueue([])} style={{ background: 'none', border: 0, color: 'var(--text-muted)', cursor: 'pointer', fontSize: 12 }}>
+                  Clear History
+                </button>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {uploadQueue.map((item, idx) => (
+                  <div key={idx} style={{ background: 'var(--surface-raised)', padding: '10px 14px', borderRadius: 8 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 6 }}>
+                      <span style={{ fontWeight: 600 }}>{item.name}</span>
+                      <span style={{ color: item.progress.percent === 100 ? '#34d399' : '#60a5fa' }}>
+                        {item.progress.phase === 'encrypting' && 'Encrypting locally with AES-256-GCM...'}
+                        {item.progress.phase === 'uploading' && `Uploading ciphertext (${item.progress.percent}%) • ${(item.progress.speedBytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`}
+                        {item.progress.phase === 'confirming' && 'Registering sync metadata...'}
+                        {item.progress.phase === 'completed' && 'Completed & Synced'}
+                      </span>
+                    </div>
+                    <div className="progress-track" style={{ height: 4 }}>
+                      <div className="progress-fill" style={{ width: `${item.progress.percent}%` }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Drag & Drop Upload Zone */}
           <div
-            className="upload-zone"
-            style={{
-              marginTop: 18,
-              border: dragActive ? '2px dashed #2563eb' : '1px dashed #cbd5e1',
-              background: dragActive ? '#eff6ff' : '#fafcff',
-              transition: '0.2s',
-            }}
             onDragEnter={handleDrag}
             onDragLeave={handleDrag}
             onDragOver={handleDrag}
             onDrop={handleDrop}
+            style={{
+              border: `2px dashed ${dragActive ? '#3b82f6' : 'var(--border)'}`,
+              background: dragActive ? 'rgba(59, 130, 246, 0.05)' : 'var(--surface)',
+              borderRadius: 'var(--radius-md)',
+              padding: '36px 20px',
+              textAlign: 'center',
+              marginBottom: 28,
+              transition: 'all 0.2s ease',
+            }}
           >
-            <FolderOpen size={28} color="#3b82f6" style={{ margin: 'auto' }} />
-            <p style={{ margin: '8px 0 4px', fontWeight: 600, color: '#1e293b' }}>
-              {busy ? 'Encrypting & uploading files…' : 'Drag & drop confidential files here'}
+            <div style={{ width: 44, height: 44, borderRadius: '50%', background: 'var(--surface-raised)', color: '#60a5fa', display: 'grid', placeItems: 'center', margin: '0 auto 12px' }}>
+              <UploadCloud size={22} />
+            </div>
+            <h4 style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>Drag and drop files to encrypt and transfer</h4>
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 16px' }}>
+              Files are encrypted locally on this device using AES-256-GCM before transferring ciphertext to private cloud storage.
             </p>
-            <span style={{ fontSize: 11, color: '#64748b' }}>
-              AES-256-GCM authenticated encryption applied automatically · Or{' '}
-              <label style={{ color: '#2563eb', cursor: 'pointer', fontWeight: 600 }}>
-                browse files
-                <input type="file" multiple hidden onChange={onFileInput} />
-              </label>
-            </span>
+            <label className="btn-secondary btn-sm" style={{ cursor: 'pointer', display: 'inline-flex' }}>
+              <span>Browse Local Files</span>
+              <input type="file" multiple onChange={(e) => handleFilesUpload(Array.from(e.target.files || []))} style={{ display: 'none' }} />
+            </label>
           </div>
 
-          {/* Files & Recent Activity Grid */}
-          <div className="dash-grid">
-            {/* Left: Files Table */}
-            <section className="panel" id="files">
-              <div className="panel-title">
-                <h3>Files Stored ({data.files.length})</h3>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <div style={{ position: 'relative' }}>
-                    <Search size={13} style={{ position: 'absolute', left: 8, top: 7, color: '#94a3b8' }} />
-                    <input
-                      type="text"
-                      placeholder="Search files…"
-                      value={search}
-                      onChange={(e) => setSearch(e.target.value)}
-                      style={{
-                        padding: '4px 8px 4px 26px',
-                        fontSize: 11,
-                        borderRadius: 6,
-                        border: '1px solid #e2e8f0',
-                        outline: 'none',
-                      }}
-                    />
-                  </div>
-                  <Link href="/files" className="text-link" style={{ margin: 0 }}>
-                    View all →
-                  </Link>
-                </div>
-              </div>
-
-              {filteredFiles.length ? (
-                <table className="files-table">
-                  <thead>
-                    <tr>
-                      <th>FILE NAME</th>
-                      <th>SIZE</th>
-                      <th>UPLOADED</th>
-                      <th style={{ textAlign: 'right' }}>ACTIONS</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredFiles.map((f) => (
-                      <tr key={f.id}>
-                        <td className="file-cell">
-                          <Link href={`/files/${f.id}`} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span className="file-icon">{getFileIcon(f.name)}</span>
-                            <div>
-                              <span>{f.name}</span>
-                              {f.sha256_checksum && (
-                                <small style={{ display: 'block', color: '#94a3b8', fontSize: 9, fontFamily: 'monospace' }}>
-                                  SHA: {f.sha256_checksum.slice(0, 10)}…
-                                </small>
-                              )}
-                            </div>
-                          </Link>
-                        </td>
-                        <td>{fmt(f.size)}</td>
-                        <td>{new Date(f.created_at).toLocaleDateString()}</td>
-                        <td style={{ textAlign: 'right' }}>
-                          <button
-                            title="Direct Download"
-                            onClick={async () => {
-                              const r = await fetch(`${API}/api/files/${f.id}/download`, {
-                                credentials: 'include',
-                              });
-                              if (r.ok) {
-                                const blob = await r.blob();
-                                const a = document.createElement('a');
-                                a.href = URL.createObjectURL(blob);
-                                a.download = f.name;
-                                a.click();
-                                URL.revokeObjectURL(a.href);
-                              } else {
-                                alert('Decryption failed or file unavailable');
-                              }
-                            }}
-                            style={{ border: 0, background: 'none', color: '#2563eb', cursor: 'pointer', padding: 5 }}
-                          >
-                            <ArrowDownToLine size={15} />
-                          </button>
-
-                          <button
-                            title="Create Secure Share Link"
-                            onClick={() => {
-                              setShareFile(f);
-                              setGeneratedLink('');
-                              setSharePassword('');
-                              setExpiresHours('24');
-                              setMaxDownloads('10');
-                            }}
-                            style={{ border: 0, background: 'none', color: '#059669', cursor: 'pointer', padding: 5 }}
-                          >
-                            <Share2 size={15} />
-                          </button>
-
-                          <Link
-                            href={`/files/${f.id}`}
-                            title="Inspect Cryptographic Metadata"
-                            style={{ color: '#475569', padding: 5, display: 'inline-flex', alignItems: 'center' }}
-                          >
-                            <Eye size={15} />
-                          </Link>
-
-                          <button
-                            title="Delete file"
-                            onClick={() => remove(f)}
-                            style={{ border: 0, background: 'none', color: '#ef4444', cursor: 'pointer', padding: 5 }}
-                          >
-                            <Trash2 size={15} />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              ) : (
-                <div className="empty">
-                  {search ? 'No matching files found.' : 'No files uploaded yet. Add a file to start encrypted storage.'}
-                </div>
-              )}
-            </section>
-
-            {/* Right: Recent Activity Feed */}
-            <section className="panel">
-              <div className="panel-title">
-                <h3>Audit Trail & Activity</h3>
-                <Link href="/access-logs" style={{ fontSize: 11, color: '#2563eb' }}>
-                  Full log →
+          {/* Main Content Grid: Recent Files & Live Activity */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: 24 }}>
+            {/* Recent Files Table */}
+            <div className="card" style={{ padding: 20 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <h3 style={{ fontSize: 16, fontWeight: 700 }}>Recent Encrypted Files</h3>
+                <Link href="/files" style={{ fontSize: 12, color: '#60a5fa', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  View All Files <ChevronRight size={14} />
                 </Link>
               </div>
 
-              {data.activity.length ? (
-                data.activity.map((a, i) => (
-                  <div className="activity-row" key={i}>
-                    <span className="activity-dot">
-                      {a.action.includes('download') ? (
-                        <ArrowDownToLine size={13} />
-                      ) : a.action.includes('upload') ? (
-                        <ArrowUpFromLine size={13} />
-                      ) : a.action.includes('share') ? (
-                        <Share2 size={13} />
-                      ) : (
-                        <ShieldCheck size={13} />
-                      )}
-                    </span>
-                    <div>
-                      <b>{a.detail}</b>
-                      <small>{new Date(a.created_at).toLocaleString()}</small>
-                    </div>
-                  </div>
-                ))
+              {filteredFiles.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '36px 0', color: 'var(--text-muted)', fontSize: 13 }}>
+                  No encrypted files yet. Upload a file above to begin.
+                </div>
               ) : (
-                <div className="empty">Actions and file downloads will be logged here.</div>
+                <div style={{ overflowX: 'auto' }}>
+                  <table className="file-table">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Size</th>
+                        <th>Cipher</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredFiles.slice(0, 8).map((f) => (
+                        <tr key={f.id}>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                              <div style={{ width: 28, height: 28, borderRadius: 6, background: 'var(--surface-raised)', display: 'grid', placeItems: 'center' }}>
+                                {getFileIcon(f.name)}
+                              </div>
+                              <span style={{ fontWeight: 600, color: 'var(--text-primary)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {f.name}
+                              </span>
+                            </div>
+                          </td>
+                          <td>{fmt(f.size)}</td>
+                          <td>
+                            <span className="badge badge-emerald" style={{ fontSize: 10 }}>
+                              {f.encryption_version === 'v2' ? 'Device AES-GCM' : 'Envelope v1'}
+                            </span>
+                          </td>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <button
+                                title="Download & Locally Decrypt"
+                                onClick={() => handleDownload(f)}
+                                className="btn-secondary btn-sm"
+                                style={{ padding: 6 }}
+                              >
+                                <ArrowDownToLine size={13} />
+                              </button>
+                              <button
+                                title="Create Zero-Knowledge Share Link"
+                                onClick={() => {
+                                  setShareFile(f);
+                                  setGeneratedLink('');
+                                }}
+                                className="btn-secondary btn-sm"
+                                style={{ padding: 6 }}
+                              >
+                                <Share2 size={13} />
+                              </button>
+                              <button
+                                title="Move to Trash"
+                                onClick={() => handleTrash(f)}
+                                className="btn-secondary btn-sm"
+                                style={{ padding: 6, color: '#f87171' }}
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
-            </section>
+            </div>
+
+            {/* Cryptographic Activity Timeline */}
+            <div className="card" style={{ padding: 20 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <h3 style={{ fontSize: 16, fontWeight: 700 }}>Access & Security Audit</h3>
+                <Link href="/access-logs" style={{ fontSize: 12, color: '#60a5fa', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  Full Audit Trail <ChevronRight size={14} />
+                </Link>
+              </div>
+
+              {activities.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '36px 0', color: 'var(--text-muted)', fontSize: 13 }}>
+                  No recent audit activities recorded.
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  {activities.slice(0, 6).map((a, i) => (
+                    <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 12, paddingBottom: 12, borderBottom: '1px solid var(--border)' }}>
+                      <div style={{ width: 26, height: 26, borderRadius: '50%', background: 'rgba(59, 130, 246, 0.12)', color: '#60a5fa', display: 'grid', placeItems: 'center', marginTop: 2 }}>
+                        <Activity size={13} />
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{a.detail}</div>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                          {a.action} • {new Date(a.created_at).toLocaleString()}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </main>
 
       {/* Share Modal Dialog */}
       {shareFile && (
-        <div className="modal-backdrop" onClick={() => setShareFile(null)}>
-          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-head">
-              <h3>Secure Share: {shareFile.name}</h3>
-              <button className="modal-close" onClick={() => setShareFile(null)}>
+        <div className="modal-overlay" onClick={() => setShareFile(null)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Share2 size={18} className="text-blue-400" />
+                <h3 style={{ fontSize: 17, fontWeight: 700 }}>Share "{shareFile.name}"</h3>
+              </div>
+              <button onClick={() => setShareFile(null)} style={{ background: 'none', border: 0, color: 'var(--text-muted)', cursor: 'pointer' }}>
                 <X size={18} />
               </button>
             </div>
 
             {!generatedLink ? (
-              <div>
-                <p style={{ fontSize: 12, color: '#64748b', margin: '0 0 16px' }}>
-                  Configure link security parameters. Only recipients holding the secure high-entropy token can access this file.
-                </p>
-
-                <div className="field">
-                  <label htmlFor="modal-expires">Link Expiration</label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
+                    Expiration Hours
+                  </label>
                   <select
-                    id="modal-expires"
                     value={expiresHours}
                     onChange={(e) => setExpiresHours(e.target.value)}
-                    style={{
-                      height: 40,
-                      borderRadius: 6,
-                      border: '1px solid #cbd5e1',
-                      padding: '0 10px',
-                      fontSize: 13,
-                    }}
+                    style={{ width: '100%', height: 38, background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-primary)', padding: '0 10px', fontSize: 13 }}
                   >
                     <option value="1">1 Hour</option>
                     <option value="24">24 Hours (1 Day)</option>
-                    <option value="168">7 Days (1 Week)</option>
-                    <option value="720">30 Days</option>
+                    <option value="72">72 Hours (3 Days)</option>
+                    <option value="168">7 Days</option>
                     <option value="unlimited">No Expiration</option>
                   </select>
                 </div>
 
-                <div className="field">
-                  <label htmlFor="modal-downloads">Maximum Downloads Limit</label>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
+                    Maximum Allowed Downloads
+                  </label>
                   <select
-                    id="modal-downloads"
                     value={maxDownloads}
                     onChange={(e) => setMaxDownloads(e.target.value)}
-                    style={{
-                      height: 40,
-                      borderRadius: 6,
-                      border: '1px solid #cbd5e1',
-                      padding: '0 10px',
-                      fontSize: 13,
-                    }}
+                    style={{ width: '100%', height: 38, background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-primary)', padding: '0 10px', fontSize: 13 }}
                   >
-                    <option value="1">1 Download (Self-destruct)</option>
+                    <option value="1">1 Download (One-time transfer)</option>
                     <option value="5">5 Downloads</option>
                     <option value="10">10 Downloads</option>
-                    <option value="25">25 Downloads</option>
+                    <option value="50">50 Downloads</option>
                     <option value="unlimited">Unlimited Downloads</option>
                   </select>
                 </div>
 
-                <div className="field">
-                  <label htmlFor="modal-password">Optional Password Protection (Argon2id)</label>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
+                    Optional Argon2id Password Protection
+                  </label>
                   <input
-                    id="modal-password"
                     type="password"
-                    placeholder="Leave blank for token-only access"
+                    placeholder="Leave empty for unpassworded link"
                     value={sharePassword}
                     onChange={(e) => setSharePassword(e.target.value)}
+                    style={{ width: '100%', height: 38, background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-primary)', padding: '0 10px', fontSize: 13 }}
                   />
                 </div>
 
-                <div style={{ marginTop: 20, display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
-                  <button type="button" className="btn-outline" onClick={() => setShareFile(null)}>
-                    Cancel
-                  </button>
-                  <button type="button" className="button" disabled={shareBusy} onClick={createShareLink}>
-                    {shareBusy ? 'Generating…' : 'Generate Secure Link'}
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div>
-                <div style={{ padding: '12px 14px', background: '#ecfdf5', borderRadius: 8, color: '#065f46', marginBottom: 16 }}>
-                  <strong>Secure link ready!</strong>
-                  <p style={{ margin: '4px 0 0', fontSize: 12 }}>
-                    This link grants access based on your configured limits. Send it directly to your recipient.
-                  </p>
+                <div style={{ background: 'var(--surface-raised)', padding: 12, borderRadius: 8, fontSize: 11, color: 'var(--text-muted)' }}>
+                  🔒 <b>Zero-Knowledge Key Encoding:</b> The 256-bit decryption key will be attached as a URL fragment (#key=...) which is processed solely by the recipient browser and never sent over HTTP to Render.
                 </div>
 
-                <div className="field">
-                  <label>Sharing URL</label>
+                <button
+                  onClick={createShareLink}
+                  disabled={shareBusy}
+                  className="btn-primary"
+                  style={{ width: '100%', justifyContent: 'center', marginTop: 8 }}
+                >
+                  {shareBusy ? 'Generating Cryptographic Link...' : 'Create Secure Share Link'}
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                <div style={{ background: 'rgba(16, 185, 129, 0.1)', border: '1px solid #10b981', padding: 12, borderRadius: 8, color: '#34d399', fontSize: 13 }}>
+                  ✓ Secure share link generated successfully!
+                </div>
+
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
+                    Zero-Knowledge Share URL
+                  </label>
                   <div style={{ display: 'flex', gap: 8 }}>
-                    <input type="text" readOnly value={generatedLink} style={{ flex: 1, fontFamily: 'monospace', fontSize: 12 }} />
-                    <button type="button" className="button" onClick={copyToClipboard} style={{ padding: '0 14px' }}>
-                      {copied ? <Check size={16} /> : <Copy size={16} />}
-                      {copied ? 'Copied' : 'Copy'}
+                    <input
+                      type="text"
+                      readOnly
+                      value={generatedLink}
+                      style={{ flex: 1, height: 38, background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-primary)', padding: '0 10px', fontSize: 12, fontFamily: 'DM Mono, monospace' }}
+                    />
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(generatedLink);
+                        setCopied(true);
+                        setTimeout(() => setCopied(false), 2000);
+                      }}
+                      className="btn-primary btn-sm"
+                    >
+                      {copied ? <Check size={14} /> : <Copy size={14} />} {copied ? 'Copied' : 'Copy'}
                     </button>
                   </div>
                 </div>
 
-                <div style={{ marginTop: 20, display: 'flex', justifyContent: 'flex-end' }}>
-                  <button type="button" className="btn-outline" onClick={() => setShareFile(null)}>
-                    Close
-                  </button>
-                </div>
+                <button onClick={() => setShareFile(null)} className="btn-secondary" style={{ width: '100%', justifyContent: 'center' }}>
+                  Done
+                </button>
               </div>
             )}
           </div>

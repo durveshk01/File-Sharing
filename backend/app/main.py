@@ -1,5 +1,7 @@
+import base64
 import hashlib
 import json
+import re
 import secrets
 import smtplib
 import subprocess
@@ -23,6 +25,7 @@ from app.encryption import decrypt_file, encrypt_file
 from app.mime_validator import validate_file_content
 from app.models import (
     Activity,
+    DeviceRecord,
     FileAccessLog,
     FilePermission,
     FileRecord,
@@ -183,6 +186,37 @@ class ResumableInitIn(BaseModel):
     content_type: str = "application/octet-stream"
     total_chunks: int = Field(ge=1, le=5000)
 
+class UploadIntentIn(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    size: int = Field(gt=0)
+    ciphertext_size: int = Field(gt=0)
+    content_type: str = "application/octet-stream"
+    sha256_checksum: str | None = None
+    ciphertext_sha256: str | None = None
+    nonce_b64: str = Field(min_length=1)
+    wrapped_key_b64: str = ""
+    encryption_version: str = "v2"
+    device_id: str | None = None
+
+class ConfirmUploadIn(BaseModel):
+    ciphertext_sha256: str | None = None
+    device_id: str | None = None
+
+class DeviceRegisterIn(BaseModel):
+    device_id: str = Field(min_length=1, max_length=36)
+    device_name: str = Field(min_length=1, max_length=100)
+    device_type: str = Field(default="mobile", pattern="^(mobile|web|desktop)$")
+    push_token: str | None = None
+
+class SyncBatchIn(BaseModel):
+    device_id: str | None = None
+    renames: list[dict] = Field(default_factory=list)
+    deletions: list[dict] = Field(default_factory=list)
+
+class FileUpdateIn(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    version: int | None = None
+
 def send_email(to: str, subject: str, body: str):
     if settings.mail_mode == "console":
         sent_emails.append({"to": to, "subject": subject, "body": body})
@@ -260,6 +294,11 @@ def safe_file(f: FileRecord):
         "size": f.size,
         "content_type": f.content_type,
         "sha256_checksum": getattr(f, "sha256_checksum", None),
+        "ciphertext_sha256": getattr(f, "ciphertext_sha256", None),
+        "version": getattr(f, "version", 1),
+        "encryption_version": getattr(f, "encryption_version", "v1"),
+        "client_modified_at": f.client_modified_at.isoformat() if getattr(f, "client_modified_at", None) else None,
+        "is_deleted": getattr(f, "is_deleted", False),
         "created_at": f.created_at.isoformat(),
     }
 
@@ -303,10 +342,10 @@ def demo_login(response: Response, db: Session = Depends(get_db)):
                     verified_at=datetime.now(timezone.utc))
         db.add(user)
         db.commit()
-    issue_session(user, db, response)
+    token = issue_session(user, db, response)
     activity(db, user, "auth.demo", "Started demo session")
     db.commit()
-    return {"id": user.id, "name": user.name, "email": user.email}
+    return {"id": user.id, "name": user.name, "email": user.email, "token": token}
 
 # ----------------- Auth Routes -----------------
 
@@ -407,10 +446,10 @@ def login(body: LoginIn, response: Response, db: Session = Depends(get_db)):
         db.commit()
         return {"require_2fa": True, "challenge_token": challenge}
 
-    issue_session(user, db, response)
+    token = issue_session(user, db, response)
     activity(db, user, "auth.login", "Signed in")
     db.commit()
-    return {"id": user.id, "name": user.name, "email": user.email}
+    return {"id": user.id, "name": user.name, "email": user.email, "token": token}
 
 @app.post("/api/auth/login/2fa")
 def login_2fa(body: Login2FAIn, response: Response, db: Session = Depends(get_db)):
@@ -444,10 +483,10 @@ def login_2fa(body: Login2FAIn, response: Response, db: Session = Depends(get_db
         raise HTTPException(401, "Invalid authentication code or recovery code")
 
     record.used = True
-    issue_session(user, db, response)
+    token = issue_session(user, db, response)
     activity(db, user, "auth.login_2fa", "Signed in via two-factor authentication")
     db.commit()
-    return {"id": user.id, "name": user.name, "email": user.email}
+    return {"id": user.id, "name": user.name, "email": user.email, "token": token}
 
 # ----------------- 2FA Management Routes -----------------
 
@@ -802,8 +841,22 @@ def abort_resumable_upload(upload_id: str, user: User = Depends(current_user), d
 def list_files(user: User = Depends(current_user), db: Session = Depends(get_db)):
     return [
         safe_file(f)
-        for f in db.scalars(select(FileRecord).where(FileRecord.owner_id == user.id).order_by(FileRecord.created_at.desc())).all()
+        for f in db.scalars(
+            select(FileRecord)
+            .where(FileRecord.owner_id == user.id, FileRecord.is_deleted.is_(False))
+            .order_by(FileRecord.created_at.desc())
+        ).all()
     ]
+
+@app.get("/api/files/trash")
+def list_trash(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """List soft-deleted files in trash."""
+    files = db.scalars(
+        select(FileRecord)
+        .where(FileRecord.owner_id == user.id, FileRecord.is_deleted.is_(True))
+        .order_by(FileRecord.deleted_at.desc())
+    ).all()
+    return [safe_file(f) for f in files]
 
 @app.get("/api/files/{file_id}")
 def file_detail(file_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
@@ -1525,3 +1578,514 @@ def mark_all_notifications_read(user: User = Depends(current_user), db: Session 
     )
     db.commit()
     return {"status": "ok"}
+
+# ==============================================================================
+# PHASE 4 & 5: DEVICE-POWERED FILE PROCESSING & LOCAL-FIRST CLOUD SYNCHRONIZATION
+# ==============================================================================
+
+@app.post("/api/storage/upload-intent", status_code=201)
+def upload_intent(body: UploadIntentIn, request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """
+    Authorize direct encrypted upload from device to object storage.
+    Render coordinates metadata and generates short-lived upload authorization.
+    Render does NOT receive or process plaintext file contents.
+    """
+    if body.size > settings.max_upload_bytes:
+        raise HTTPException(413, f"File exceeds maximum size limit of {settings.max_upload_bytes} bytes")
+
+    clean_name = Path(body.name).name.strip().replace("\x00", "")[:255] or "file"
+    try:
+        nonce_bytes = base64.b64decode(body.nonce_b64)
+    except Exception:
+        raise HTTPException(400, "Invalid base64 nonce")
+
+    wrapped_key_bytes = b""
+    if body.wrapped_key_b64:
+        try:
+            wrapped_key_bytes = base64.b64decode(body.wrapped_key_b64)
+        except Exception:
+            raise HTTPException(400, "Invalid base64 wrapped_key")
+
+    object_key = secrets.token_hex(32)
+    file_id = str(uuid.uuid4())
+
+    record = FileRecord(
+        id=file_id,
+        owner_id=user.id,
+        name=clean_name,
+        content_type=body.content_type[:120],
+        size=body.size,
+        object_key=object_key,
+        wrapped_key=wrapped_key_bytes,
+        nonce=nonce_bytes,
+        sha256_checksum=body.sha256_checksum,
+        ciphertext_sha256=body.ciphertext_sha256,
+        encryption_version=body.encryption_version or "v2",
+        version=1,
+        client_modified_at=datetime.now(timezone.utc),
+        is_deleted=False,
+    )
+    db.add(record)
+    db.commit()
+
+    presigned = storage.generate_presigned_upload(object_key, content_type="application/octet-stream")
+    return {
+        "file_id": record.id,
+        "object_key": object_key,
+        "upload_url": presigned["upload_url"],
+        "upload_method": presigned["method"],
+        "upload_headers": presigned.get("headers", {}),
+        "mode": presigned["mode"],
+        "expires_in": presigned["expires_in"],
+    }
+
+@app.post("/api/files/{file_id}/confirm-upload")
+def confirm_upload(file_id: str, body: ConfirmUploadIn, request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """
+    Finalize device-powered encrypted upload after ciphertext reaches object storage.
+    """
+    f = owned_file(file_id, user, db)
+    if not storage.exists(f.object_key):
+        raise HTTPException(400, "Encrypted payload has not yet been received in storage")
+    if body.ciphertext_sha256:
+        f.ciphertext_sha256 = body.ciphertext_sha256
+    f.client_modified_at = datetime.now(timezone.utc)
+    activity(db, user, "file.uploaded_device_encrypted", f"Device-encrypted upload complete: {f.name}")
+    record_access_log(
+        db,
+        action="file.uploaded_device_encrypted",
+        file_id=f.id,
+        user_id=user.id,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        result="success",
+    )
+    notify(db, user, f"Encrypted transfer complete: {f.name}")
+    db.commit()
+    return safe_file(f)
+
+@app.get("/api/files/{file_id}/download-intent")
+def download_intent(file_id: str, request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """
+    Authorize direct ciphertext download from object storage to device.
+    The device decrypts the file locally using its private or shared keys.
+    """
+    f = db.scalar(select(FileRecord).where(FileRecord.id == file_id, FileRecord.owner_id == user.id, FileRecord.is_deleted.is_(False)))
+    if not f:
+        perm = db.scalar(select(FilePermission).where(FilePermission.file_id == file_id, FilePermission.email == user.email))
+        if perm:
+            f = db.get(FileRecord, file_id)
+    if not f or f.is_deleted:
+        raise HTTPException(404, "File not found")
+
+    presigned = storage.generate_presigned_download(f.object_key, filename=f.name)
+    record_access_log(
+        db,
+        action="file.download_intent_granted",
+        file_id=f.id,
+        user_id=user.id,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        result="success",
+    )
+    db.commit()
+    return {
+        "file_id": f.id,
+        "name": f.name,
+        "size": f.size,
+        "content_type": f.content_type,
+        "sha256_checksum": f.sha256_checksum,
+        "ciphertext_sha256": f.ciphertext_sha256,
+        "nonce_b64": base64.b64encode(f.nonce).decode(),
+        "wrapped_key_b64": base64.b64encode(f.wrapped_key).decode() if f.wrapped_key else "",
+        "encryption_version": f.encryption_version,
+        "download_url": presigned["download_url"],
+        "mode": presigned["mode"],
+        "expires_in": presigned["expires_in"],
+    }
+
+@app.post("/api/shares/{token}/download-intent")
+def shared_download_intent(token: str, request: Request, db: Session = Depends(get_db)):
+    """
+    Authorize direct encrypted download for a public share link recipient.
+    Validates atomic download limits and optional Argon2id password protection.
+    Recipient device decrypts ciphertext locally using the zero-knowledge key fragment.
+    """
+    with _download_guard:
+        s = db.scalar(select(ShareLink).where(ShareLink.token_hash == digest(token)))
+        if not valid_share(s):
+            record_access_log(
+                db,
+                action="share.download_denied",
+                share_id=s.id if s else None,
+                ip_address=request.client.host if request.client else None,
+                user_agent=request.headers.get("user-agent"),
+                result="denied",
+                failure_reason="Link expired, revoked, or limit reached",
+            )
+            db.commit()
+            raise HTTPException(404, "Share link is unavailable")
+
+        if s.password_hash:
+            grant = request.headers.get("X-Share-Grant", "")
+            proof = db.get(ShareGrant, digest(grant))
+            if not proof or proof.share_id != s.id or as_utc(proof.expires_at) <= datetime.now(timezone.utc):
+                raise HTTPException(403, "Verify the share password before downloading")
+
+        # Atomic download counter increment
+        stmt = (
+            update(ShareLink)
+            .where(
+                ShareLink.id == s.id,
+                ShareLink.revoked.is_(False),
+                or_(
+                    ShareLink.max_downloads.is_(None),
+                    ShareLink.downloads < ShareLink.max_downloads,
+                ),
+            )
+            .values(downloads=ShareLink.downloads + 1)
+        )
+        result = db.execute(stmt)
+        db.commit()
+        if result.rowcount == 0:
+            raise HTTPException(410, "Download limit reached")
+
+        f = db.get(FileRecord, s.file_id)
+        if not f or f.is_deleted:
+            raise HTTPException(404, "File not found")
+
+        presigned = storage.generate_presigned_download(f.object_key, filename=f.name)
+        record_access_log(
+            db,
+            action="share.download_intent_granted",
+            share_id=s.id,
+            file_id=f.id,
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+            result="success",
+        )
+        db.commit()
+        return {
+            "file_id": f.id,
+            "name": f.name,
+            "size": f.size,
+            "content_type": f.content_type,
+            "sha256_checksum": f.sha256_checksum,
+            "ciphertext_sha256": f.ciphertext_sha256,
+            "nonce_b64": base64.b64encode(f.nonce).decode(),
+            "wrapped_key_b64": base64.b64encode(f.wrapped_key).decode() if f.wrapped_key else "",
+            "encryption_version": f.encryption_version,
+            "download_url": presigned["download_url"],
+            "mode": presigned["mode"],
+            "expires_in": presigned["expires_in"],
+        }
+
+@app.put("/api/storage/raw/{object_key}")
+async def put_raw_storage(object_key: str, request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """
+    Direct raw ciphertext streaming receiver when using local storage adapter.
+    Streams directly to disk without parsing, decrypting, or buffering in memory.
+    """
+    if not re.match(r"^[a-fA-F0-9]{32,80}$", object_key):
+        raise HTTPException(400, "Invalid object key")
+
+    target_path = Path(settings.storage_path).resolve() / object_key
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    total_written = 0
+    with open(target_path, "wb") as f_out:
+        async for chunk in request.stream():
+            total_written += len(chunk)
+            if total_written > settings.max_upload_bytes * 1.2:
+                target_path.unlink(missing_ok=True)
+                raise HTTPException(413, "Uploaded ciphertext exceeds size limit")
+            f_out.write(chunk)
+
+    return {"status": "stored", "bytes": total_written}
+
+@app.get("/api/storage/raw/{object_key}")
+def get_raw_storage(object_key: str, request: Request):
+    """
+    Direct raw ciphertext streaming download when using local storage adapter.
+    Supports HTTP Range requests for resumable downloads.
+    """
+    if not re.match(r"^[a-fA-F0-9]{32,80}$", object_key):
+        raise HTTPException(400, "Invalid object key")
+
+    target_path = Path(settings.storage_path).resolve() / object_key
+    if not target_path.exists():
+        raise HTTPException(404, "Storage object not found")
+
+    file_size = target_path.stat().st_size
+    range_header = request.headers.get("range")
+    if range_header:
+        range_match = re.match(r"bytes=(\d+)-(\d*)", range_header)
+        if range_match:
+            start = int(range_match.group(1))
+            end = int(range_match.group(2)) if range_match.group(2) else file_size - 1
+            length = (end - start) + 1
+
+            def stream_range():
+                with open(target_path, "rb") as f:
+                    f.seek(start)
+                    remaining = length
+                    while remaining > 0:
+                        chunk = f.read(min(remaining, 64 * 1024))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                        yield chunk
+
+            return StreamingResponse(
+                stream_range(),
+                status_code=206,
+                headers={
+                    "Content-Range": f"bytes {start}-{end}/{file_size}",
+                    "Accept-Ranges": "bytes",
+                    "Content-Length": str(length),
+                    "Content-Type": "application/octet-stream",
+                },
+            )
+
+    def stream_file():
+        with open(target_path, "rb") as f:
+            while True:
+                chunk = f.read(64 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+
+    return StreamingResponse(
+        stream_file(),
+        headers={
+            "Content-Length": str(file_size),
+            "Accept-Ranges": "bytes",
+            "Content-Type": "application/octet-stream",
+        },
+    )
+
+# ----------------- File Management Enhancements -----------------
+
+@app.patch("/api/files/{file_id}")
+def update_file_metadata(file_id: str, body: FileUpdateIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """
+    Conflict-safe metadata update (rename) with optimistic concurrency control.
+    """
+    f = owned_file(file_id, user, db)
+    if body.version is not None and body.version < f.version:
+        raise HTTPException(409, f"Conflict: file was modified elsewhere. Current version is {f.version}")
+    if body.name:
+        f.name = Path(body.name).name.strip().replace("\x00", "")[:255] or f.name
+    f.version += 1
+    f.client_modified_at = datetime.now(timezone.utc)
+    activity(db, user, "file.renamed", f"Renamed file to {f.name}")
+    db.commit()
+    return safe_file(f)
+
+@app.post("/api/files/{file_id}/trash")
+def trash_file(file_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Soft-delete a file to the user's trash."""
+    f = owned_file(file_id, user, db)
+    f.is_deleted = True
+    f.deleted_at = datetime.now(timezone.utc)
+    f.version += 1
+    activity(db, user, "file.trashed", f"Moved {f.name} to trash")
+    db.commit()
+    return {"status": "trashed", "file": safe_file(f)}
+
+@app.post("/api/files/{file_id}/restore")
+def restore_file(file_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Restore a soft-deleted file from trash."""
+    f = db.scalar(select(FileRecord).where(FileRecord.id == file_id, FileRecord.owner_id == user.id))
+    if not f:
+        raise HTTPException(404, "File not found")
+    f.is_deleted = False
+    f.deleted_at = None
+    f.version += 1
+    f.client_modified_at = datetime.now(timezone.utc)
+    activity(db, user, "file.restored", f"Restored {f.name} from trash")
+    db.commit()
+    return {"status": "restored", "file": safe_file(f)}
+
+@app.post("/api/files/{file_id}/copy", status_code=201)
+def copy_file(file_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """
+    Zero-reupload metadata clone referencing the same ciphertext object.
+    """
+    orig = owned_file(file_id, user, db)
+    new_name = f"Copy of {orig.name}"
+    copy_record = FileRecord(
+        id=str(uuid.uuid4()),
+        owner_id=user.id,
+        name=new_name,
+        content_type=orig.content_type,
+        size=orig.size,
+        object_key=orig.object_key,
+        wrapped_key=orig.wrapped_key,
+        nonce=orig.nonce,
+        sha256_checksum=orig.sha256_checksum,
+        ciphertext_sha256=orig.ciphertext_sha256,
+        encryption_version=orig.encryption_version,
+        version=1,
+        is_deleted=False,
+    )
+    db.add(copy_record)
+    activity(db, user, "file.copied", f"Created copy {new_name}")
+    db.commit()
+    return safe_file(copy_record)
+
+# ----------------- Device Registration & Synchronization -----------------
+
+@app.post("/api/sync/device/register")
+def register_device(body: DeviceRegisterIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """
+    Register or update a user device (mobile, web, desktop) for push and sync coordination.
+    """
+    dev = db.get(DeviceRecord, body.device_id)
+    if not dev:
+        dev = DeviceRecord(
+            id=body.device_id,
+            user_id=user.id,
+            device_name=body.device_name,
+            device_type=body.device_type,
+            push_token=body.push_token,
+            last_seen_at=datetime.now(timezone.utc),
+            last_synced_at=datetime.now(timezone.utc),
+        )
+        db.add(dev)
+    else:
+        if dev.user_id != user.id:
+            raise HTTPException(403, "Device ID already associated with another account")
+        dev.device_name = body.device_name
+        dev.device_type = body.device_type
+        if body.push_token:
+            dev.push_token = body.push_token
+        dev.last_seen_at = datetime.now(timezone.utc)
+        dev.last_synced_at = datetime.now(timezone.utc)
+    db.commit()
+    return {
+        "id": dev.id,
+        "device_name": dev.device_name,
+        "device_type": dev.device_type,
+        "last_synced_at": dev.last_synced_at.isoformat() if dev.last_synced_at else None,
+    }
+
+@app.get("/api/sync/devices")
+def list_devices(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """List all active registered devices for current user."""
+    devs = db.scalars(
+        select(DeviceRecord)
+        .where(DeviceRecord.user_id == user.id, DeviceRecord.revoked.is_(False))
+        .order_by(DeviceRecord.last_seen_at.desc())
+    ).all()
+    return [
+        {
+            "id": d.id,
+            "device_name": d.device_name,
+            "device_type": d.device_type,
+            "last_seen_at": d.last_seen_at.isoformat(),
+            "last_synced_at": d.last_synced_at.isoformat() if d.last_synced_at else None,
+            "created_at": d.created_at.isoformat(),
+        }
+        for d in devs
+    ]
+
+@app.delete("/api/sync/devices/{device_id}", status_code=204)
+def revoke_device(device_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Revoke a device."""
+    dev = db.get(DeviceRecord, device_id)
+    if dev and dev.user_id == user.id:
+        dev.revoked = True
+        activity(db, user, "device.revoked", f"Revoked device: {dev.device_name}")
+        db.commit()
+
+@app.get("/api/sync/cursor")
+def sync_cursor(since: str | None = None, device_id: str | None = None, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """
+    Cursor-based sync endpoint. Returns changes since the specified timestamp cursor.
+    Allows mobile clients to retrieve delta changes efficiently without full polling.
+    """
+    query = select(FileRecord).where(FileRecord.owner_id == user.id)
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            query = query.where(
+                or_(
+                    FileRecord.created_at >= since_dt,
+                    FileRecord.client_modified_at >= since_dt,
+                    FileRecord.deleted_at >= since_dt,
+                )
+            )
+        except Exception:
+            pass
+
+    files = db.scalars(query.order_by(FileRecord.created_at.desc())).all()
+
+    if device_id:
+        dev = db.get(DeviceRecord, device_id)
+        if dev and dev.user_id == user.id:
+            dev.last_synced_at = datetime.now(timezone.utc)
+            dev.last_seen_at = datetime.now(timezone.utc)
+            db.commit()
+
+    return {
+        "cursor": datetime.now(timezone.utc).isoformat(),
+        "files": [safe_file(f) for f in files],
+        "server_time": datetime.now(timezone.utc).isoformat(),
+        "has_more": False,
+    }
+
+@app.post("/api/sync/batch")
+def sync_batch(body: SyncBatchIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """
+    Apply offline batched changes (renames, deletions) with conflict detection.
+    """
+    results = {"renamed": [], "deleted": [], "conflicts": []}
+
+    for item in body.renames:
+        fid = item.get("file_id")
+        new_name = item.get("name")
+        client_version = item.get("version", 1)
+        f = db.scalar(select(FileRecord).where(FileRecord.id == fid, FileRecord.owner_id == user.id))
+        if f:
+            if f.version > client_version:
+                results["conflicts"].append({"file_id": fid, "server_version": f.version, "server_name": f.name})
+            else:
+                f.name = Path(new_name).name.strip().replace("\x00", "")[:255] or f.name
+                f.version += 1
+                f.client_modified_at = datetime.now(timezone.utc)
+                results["renamed"].append({"file_id": fid, "version": f.version})
+
+    for item in body.deletions:
+        fid = item.get("file_id")
+        client_version = item.get("version", 1)
+        f = db.scalar(select(FileRecord).where(FileRecord.id == fid, FileRecord.owner_id == user.id))
+        if f:
+            if f.version > client_version:
+                results["conflicts"].append({"file_id": fid, "server_version": f.version, "reason": "concurrent modification"})
+            else:
+                f.is_deleted = True
+                f.deleted_at = datetime.now(timezone.utc)
+                f.version += 1
+                results["deleted"].append({"file_id": fid, "version": f.version})
+
+    db.commit()
+    return results
+
+@app.get("/api/sync/status")
+def sync_status(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Summary of cloud storage, active/trashed files, and device status."""
+    active_files = db.scalar(select(func.count(FileRecord.id)).where(FileRecord.owner_id == user.id, FileRecord.is_deleted.is_(False)))
+    trashed_files = db.scalar(select(func.count(FileRecord.id)).where(FileRecord.owner_id == user.id, FileRecord.is_deleted.is_(True)))
+    total_bytes = db.scalar(select(func.coalesce(func.sum(FileRecord.size), 0)).where(FileRecord.owner_id == user.id, FileRecord.is_deleted.is_(False)))
+    devices_count = db.scalar(select(func.count(DeviceRecord.id)).where(DeviceRecord.user_id == user.id, DeviceRecord.revoked.is_(False)))
+
+    return {
+        "active_files_count": active_files or 0,
+        "trashed_files_count": trashed_files or 0,
+        "total_bytes_used": total_bytes or 0,
+        "quota_bytes": settings.max_upload_bytes * 20,
+        "registered_devices_count": devices_count or 0,
+        "server_time": datetime.now(timezone.utc).isoformat(),
+    }
+

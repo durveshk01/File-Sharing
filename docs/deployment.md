@@ -1,185 +1,152 @@
-# SecureShare 100% Free Production Deployment Guide (Render + Vercel)
+# SecureShare Production Deployment Guide: Mobile, Render & Vercel
 
-This guide walks you through deploying the complete SecureShare platform **100% free of cost** using:
-- **Backend & Database**: [Render](https://render.com) (FastAPI Web Service + Free PostgreSQL)
-- **Frontend**: [Vercel](https://vercel.com) (Next.js 16 Edge / Serverless)
+This comprehensive guide details the deployment architecture of the upgraded **device-powered SecureShare platform**:
+- **Coordination Backend & PostgreSQL**: [Render](https://render.com) (FastAPI Lightweight Web Service + Managed PostgreSQL)
+- **Web Frontend**: [Vercel](https://vercel.com) (Next.js 16 Edge / Serverless)
+- **Direct Object Storage**: [Cloudflare R2](https://www.cloudflare.com/developer-platform/r2/) / [AWS S3](https://aws.amazon.com/s3/) (Zero-egress private ciphertext storage)
+- **Mobile Client**: [React Native / Expo](https://expo.dev) (Local-first Android APK & iOS build via EAS)
 
 ---
 
-## 1. Architecture & Live Flow
+## 1. Architecture & Zero-Knowledge Data Flow
 
 ```
    ┌─────────────────────────────────────────────────────────────┐
    │                  Vercel (100% Free Tier)                    │
    │               Next.js 16 Frontend Hosting                  │
    │           https://secureshare-frontend.vercel.app           │
-   │                                                             │
-   │  • Serves UI / Static Assets / SSR                          │
-   │  • Optional rewrite proxy (/api/:path* -> Render)          │
+   │  • Serves Web UI & Web Crypto local AES-256-GCM engine      │
+   │  • Zero-knowledge #key= client-side decryption              │
    └──────────────────────────────┬──────────────────────────────┘
-                                  │ HTTPS / Cookies
+                                  │ HTTPS (Metadata & Coordination only)
    ┌──────────────────────────────▼──────────────────────────────┐
    │                  Render (100% Free Tier)                    │
-   │             FastAPI Web Service & Encryption Engine         │
+   │         FastAPI Lightweight Coordination Gateway            │
    │             https://secureshare-api.onrender.com            │
-   │                                                             │
-   │  • Python 3.12 Runtime                                      │
-   │  • AES-256-GCM Envelope Encryption                          │
-   │  • Argon2id Password Hashing & TOTP 2FA                     │
-   └──────────────────────────────┬──────────────────────────────┘
-                                  │ Internal Connection
-   ┌──────────────────────────────▼──────────────────────────────┐
-   │           Render Free PostgreSQL (or Neon / Supabase)       │
-   │  • 1 GB Free Persistent SQL Storage                         │
-   │  • Automated Schema Migrations (Alembic)                    │
+   │  • Session token authentication (Bearer & Cookies)          │
+   │  • Presigned URL generation for direct object storage       │
+   │  • Delta sync cursor engine & device registration           │
+   │  • NEVER buffers or decrypts plaintext files                │
+   └──────────────┬──────────────────────────────┬───────────────┘
+                  │ Internal SQL                 │ Presigned Auth
+   ┌──────────────▼──────────────┐┌──────────────▼──────────────┐
+   │   Render Managed PostgreSQL ││ Cloudflare R2 / AWS S3 Bucket│
+   │  • File metadata & sizes    ││  • Raw AES-256-GCM ciphertext│
+   │  • Sync delta cursors       ││  • Direct client transfers   │
+   │  • Ciphertext SHA-256 hashes││  • Zero server RAM buffering │
+   └─────────────────────────────┘└──────────────┬──────────────┘
+                                                 ▲ Direct Upload / Download
+                                                 │ (AES-256-GCM Ciphertext)
+   ┌─────────────────────────────────────────────┴──────────────┐
+   │          Native Mobile Device (Android / iOS)               │
+   │  • Local AES-256-GCM & SHA-256 processing on phone          │
+   │  • Hardware Keystore (Expo SecureStore)                     │
+   │  • SQLite offline-first sync queue                          │
    └─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 2. Step 1: Push Code to GitHub
+## 2. Deploying the Backend on Render
 
-Ensure all files and deployment configurations are pushed to your GitHub repository:
-```bash
-git add .
-git commit -m "feat: prepare production deployment for Render and Vercel"
-git push origin main
-```
-*Repository link example:* `https://github.com/durveshk01/File-Sharing`
+Render provisions the database and coordinates metadata.
 
----
+### Method A: Blueprint Infrastructure as Code (`render.yaml`)
+1. Sign in to [render.com](https://render.com).
+2. Click **New +** -> **Blueprint**.
+3. Select your repository (`File-Sharing`).
+4. Render detects [`render.yaml`](file:///d:/Project/New%20folder/render.yaml) automatically and plans:
+   - Web Service: `secureshare-api` (Python 3.12, Free)
+   - PostgreSQL: `secureshare-db` (Free)
+5. Click **Apply**. Render will run `pip install -r requirements.txt`, execute Alembic migrations (`python -m alembic upgrade head`), and start the API server.
 
-## 3. Step 2: Deploy Backend & Database on Render (Free)
-
-Render offers free web services and free PostgreSQL databases. You can deploy using either the **1-Click Blueprint** or **Manual Setup**.
-
-### Method A: 1-Click Infrastructure as Code (Blueprint) — Recommended
-1. Sign in or register at [render.com](https://render.com).
-2. Click the **"New +"** button at the top right and select **"Blueprint"**.
-3. Connect your GitHub repository (`File-Sharing`).
-4. Render will automatically detect [`render.yaml`](file:///d:/Project/New%20folder/render.yaml) at the repository root.
-5. Render displays:
-   - Web Service: `secureshare-api` (Python, Free plan)
-   - PostgreSQL Database: `secureshare-db` (Free plan)
-6. Click **"Apply"**.
-7. Render provisions the database, builds dependencies (`pip install -r requirements.txt`), runs database migrations, and launches Uvicorn on `$PORT`.
-
-### Method B: Manual Service Creation
-If you prefer configuring through the Render UI manually:
-1. **Create Free Database**:
-   - Go to **New +** -> **PostgreSQL**.
-   - Name: `secureshare-db`
-   - Database: `secureshare`
-   - User: `secureshare_user`
-   - Plan: **Free**
-   - Click **Create Database**. Copy the **Internal Database URL** (e.g. `postgres://...`).
-2. **Create Web Service**:
-   - Go to **New +** -> **Web Service**.
-   - Connect your GitHub repository.
-   - Root Directory: `backend`
-   - Environment: `Python 3`
-   - Region: Same region as your database (e.g. `Oregon`)
-   - Branch: `main`
-   - Build Command: `pip install -r requirements.txt`
-   - Start Command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-   - Plan: **Free**
-3. **Set Environment Variables on Render**:
-   In the service **Environment** tab, add:
-   | Key | Value | Description |
-   | :--- | :--- | :--- |
-   | `PYTHON_VERSION` | `3.12.0` | Python runtime version |
-   | `APP_SECRET` | *32-byte hex string* | e.g. `python -c "import secrets; print(secrets.token_hex(32))"` |
-   | `KEK_BASE64` | *32-byte base64 string* | e.g. `python -c "import secrets, base64; print(base64.b64encode(secrets.token_bytes(32)).decode())"` |
-   | `DATABASE_URL` | *Your Render Internal Database URL* | Render PostgreSQL URL (auto-normalized to `postgresql+psycopg://`) |
-   | `STORAGE_BACKEND` | `local` | Uses local container storage (or `s3` with free AWS S3/Cloudflare R2/Supabase) |
-   | `STORAGE_PATH` | `./storage` | Directory for encrypted ciphertexts |
-   | `FRONTEND_ORIGIN` | `https://your-frontend.vercel.app` | Your Vercel frontend URL (comma-separated or vercel.app regex allowed) |
-   | `COOKIE_SECURE` | `true` | Enforces HTTPS cookies |
-   | `COOKIE_SAMESITE` | `none` | Allows cross-origin session cookies between Vercel and Render |
-   | `RUN_MIGRATIONS_ON_START` | `true` | Executes Alembic schema migrations upon container start |
-   | `DEMO_LOGIN_ENABLED` | `true` | Enables 1-click live demo login for portfolio reviewers |
-
-4. **Verify Backend Deployment**:
-   Open `https://<your-service-name>.onrender.com/` in your browser. You should receive:
-   ```json
-   {
-     "service": "SecureShare API",
-     "status": "online",
-     "version": "1.0.0",
-     "docs": "/docs",
-     "health": "/health"
-   }
-   ```
-   Open `https://<your-service-name>.onrender.com/docs` to see the live interactive OpenAPI Swagger docs.
-
----
-
-## 4. Step 3: Deploy Frontend on Vercel (Free)
-
-Vercel natively optimizes Next.js 16 with zero configuration.
-
-1. Sign in or register at [vercel.com](https://vercel.com) using your GitHub account.
-2. Click **"Add New..."** -> **"Project"**.
-3. Under "Import Git Repository", select `File-Sharing`.
-4. In the **Configure Project** screen:
-   - **Project Name**: `secureshare` (or your choice)
-   - **Framework Preset**: `Next.js` (detected automatically)
-   - **Root Directory**: Click "Edit" and select `frontend`.
-5. In **Environment Variables**, add:
-   | Key | Value | Notes |
-   | :--- | :--- | :--- |
-   | `NEXT_PUBLIC_API_URL` | `https://<your-service-name>.onrender.com` | Your live Render backend URL |
-   | `BACKEND_URL` | `https://<your-service-name>.onrender.com` | Enables Next.js backend proxy rewrites |
-6. Click **"Deploy"**.
-7. Vercel will install dependencies, build pages with Turbopack, and assign you a live HTTPS domain:
-   `https://secureshare-<your-username>.vercel.app`
-
----
-
-## 5. Step 4: Link Frontend & Backend URLs
-
-Once both services are deployed:
-1. Copy your live Vercel URL (e.g. `https://secureshare-durvesh.vercel.app`).
-2. Go back to your Render Dashboard -> `secureshare-api` -> **Environment**.
-3. Update `FRONTEND_ORIGIN` to your exact Vercel URL:
-   ```
-   FRONTEND_ORIGIN=https://secureshare-durvesh.vercel.app
-   ```
-4. Render will automatically redeploy the backend with the updated CORS origin.
-
----
-
-## 6. Step 5: Verification & End-to-End Walkthrough
-
-1. **Visit Landing Page**:
-   Open your live Vercel URL in your browser.
-2. **Instant Demo Login**:
-   Click the **"Live Demo Login"** button on the landing page or login screen.
-3. **Upload an Encrypted File**:
-   Drag and drop any file (PDF, PNG, ZIP, TXT) into the upload dropzone. Watch the client upload, AES-256-GCM cipher encryption, and DEK wrapping take place.
-4. **Inspect Cryptographic Metadata**:
-   Click on the uploaded file to view the 96-bit nonce, 128-bit authentication tag, and wrapped key hex.
-5. **Generate a Secure Share Link**:
-   Create a link with a 24-hour expiration, a 3-download limit, and an optional recipient password.
-6. **Open in Incognito**:
-   Paste the sharing link into a private window. Enter the password (if set), verify the integrity badge, and download the decrypted file.
-7. **Audit Telemetry**:
-   Return to your dashboard and inspect `/access-logs` to see the verified download event, IP address, and timestamp.
-
----
-
-## 7. Permanent Free Cloud Database Alternatives
-
-Render's free PostgreSQL tier offers 1 GB storage and suspends after 30 days of inactivity on unmaintained accounts. If you want a **permanent free database that never expires**, you can plug in any of these free PostgreSQL providers:
-
-| Provider | Free Tier Details | Compatibility |
+### Environment Variables
+| Key | Example Value | Description |
 | :--- | :--- | :--- |
-| **[Neon.tech](https://neon.tech)** | 0.5 GB storage, serverless Postgres, instant setup, never expires | 100% compatible with `postgresql+psycopg://` |
-| **[Supabase](https://supabase.com)** | 500 MB Postgres database, connection pooling, free tier | 100% compatible |
-| **[Aiven](https://aiven.io)** | 5 GB free trial Postgres | 100% compatible |
+| `PYTHON_VERSION` | `3.12.0` | Python runtime version |
+| `APP_SECRET` | `64-char hex` | Session signing key (`secrets.token_hex(32)`) |
+| `KEK_BASE64` | `44-char base64` | Key Encryption Key (`base64.b64encode(secrets.token_bytes(32))`) |
+| `DATABASE_URL` | *fromDatabase* | Render PostgreSQL connection string |
+| `STORAGE_BACKEND` | `s3` or `local` | Set `s3` for AWS S3 / Cloudflare R2 direct transfers |
+| `S3_BUCKET_NAME` | `secureshare-vault` | Object storage bucket name |
+| `S3_ENDPOINT_URL` | `https://<account_id>.r2.cloudflarestorage.com` | R2 or S3 endpoint URL |
+| `S3_ACCESS_KEY_ID` | `r2_access_key` | S3 API Access Key ID |
+| `S3_SECRET_ACCESS_KEY` | `r2_secret_key` | S3 API Secret Key |
+| `S3_REGION` | `auto` | Bucket region |
+| `FRONTEND_ORIGIN` | `https://secureshare.vercel.app` | Allowed CORS origin |
+| `RUN_MIGRATIONS_ON_START` | `true` | Automatically runs Alembic migrations on startup |
 
-To use Neon or Supabase:
-1. Create a free project on Neon or Supabase.
-2. Copy the PostgreSQL connection string.
-3. Paste it into the `DATABASE_URL` environment variable on Render.
-4. Redeploy — Alembic will run migrations and initialize all tables automatically!
+---
+
+## 3. Deploying the Web Frontend on Vercel
+
+1. Sign in to [vercel.com](https://vercel.com) with GitHub.
+2. Click **Add New...** -> **Project** and select `File-Sharing`.
+3. Set **Root Directory** to `frontend`.
+4. Configure Environment Variables:
+   - `NEXT_PUBLIC_API_URL`: Your Render backend URL (e.g. `https://secureshare-api.onrender.com`)
+   - `BACKEND_URL`: Same Render backend URL (for Next.js rewrite proxy)
+5. Click **Deploy**. Vercel will build the standalone Next.js 16 application with Turbopack.
+
+---
+
+## 4. Mobile Client: Local Development & Android APK Build
+
+The mobile client is built on **React Native & Expo SDK 52** with native SQLite and hardware security.
+
+### A. Run Locally on Android Device / Emulator
+```bash
+cd mobile
+
+# 1. Install dependencies
+npm install
+
+# 2. Configure API endpoint in src/services/api.ts or via environment:
+# EXPO_PUBLIC_API_URL=https://secureshare-api.onrender.com
+
+# 3. Start Expo development server
+npx expo start
+```
+- Press `a` in the terminal to launch on a connected Android device via ADB.
+- Scan the QR code with the **Expo Go** app for immediate testing.
+
+### B. Build Standalone Android APK (EAS Build)
+You can compile a production `.apk` file for side-loading or release using Expo Application Services (EAS):
+
+1. **Install EAS CLI**:
+   ```bash
+   npm install -g eas-cli
+   ```
+2. **Log in to Expo**:
+   ```bash
+   eas login
+   ```
+3. **Configure Build Project** (already pre-configured in `mobile/eas.json`):
+   ```bash
+   cd mobile
+   eas build:configure
+   ```
+4. **Build APK via EAS Cloud** (Generates standalone APK installable on any Android phone):
+   ```bash
+   eas build --platform android --profile preview
+   ```
+   *EAS will build the APK in the cloud and provide a direct download link (e.g. `https://expo.dev/artifacts/eas/...apk`).*
+
+5. **Local APK Build** (Using your local Android SDK and Gradle):
+   ```bash
+   eas build --platform android --profile preview --local
+   ```
+   The compiled `.apk` will be output to your local directory.
+
+---
+
+## 5. End-to-End Operational Verification Checklist
+
+| Test Item | Verification Procedure | Expected Outcome |
+| :--- | :--- | :--- |
+| **Backend Health** | `GET https://<api-url>/health` | Status 200, `"status": "healthy"`, DB connected |
+| **Device Registration** | Mobile app logs in | Mobile device recorded in `devices` table with UUID |
+| **Client-Side Encryption** | Upload 10 MB PDF from mobile/web | Zero plaintext touches backend; object stored is encrypted ciphertext |
+| **Ciphertext Tamper Check** | Modify 1 byte of remote ciphertext | Decryption fails immediately with `InvalidTag` on phone/browser |
+| **Zero-Knowledge Link** | Open `/share/<token>#key=<key>` in incognito | Key read from URL fragment; downloaded ciphertext decrypted locally in browser |
+| **Offline Sync Queue** | Pick file on phone in airplane mode | Queued in local SQLite; automatically uploads when Wi-Fi reconnects |

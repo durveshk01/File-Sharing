@@ -19,12 +19,26 @@ class User(Base):
     recovery_codes_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     files: Mapped[list["FileRecord"]] = relationship(back_populates="owner")
+    devices: Mapped[list["DeviceRecord"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 class SessionRecord(Base):
     __tablename__ = "sessions"
     token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+class DeviceRecord(Base):
+    __tablename__ = "devices"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    device_name: Mapped[str] = mapped_column(String(100))
+    device_type: Mapped[str] = mapped_column(String(20), default="mobile")  # mobile, web, desktop
+    push_token: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+    user: Mapped["User"] = relationship(back_populates="devices")
 
 class FileRecord(Base):
     __tablename__ = "files"
@@ -38,6 +52,12 @@ class FileRecord(Base):
     nonce: Mapped[bytes] = mapped_column(LargeBinary)
     sha256_checksum: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    encryption_version: Mapped[str] = mapped_column(String(20), default="v1")  # v1=server envelope, v2=device client encrypted
+    ciphertext_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    client_modified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     owner: Mapped[User] = relationship(back_populates="files")
 
 class ShareLink(Base):

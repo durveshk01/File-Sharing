@@ -12,8 +12,12 @@ import {
   Clock,
   CheckCircle2,
   AlertCircle,
-  FileDown
+  FileDown,
+  RefreshCw,
+  Sparkles,
+  Zap
 } from 'lucide-react';
+import { downloadAndDecryptSharedFile } from '../../lib/downloader';
 
 const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -35,6 +39,7 @@ export default function SharedFile() {
     max_downloads?: number | null;
     downloads?: number;
     password_required?: boolean;
+    encryption_version?: string;
   } | null>(null);
 
   const [loading, setLoading] = useState(true);
@@ -43,9 +48,20 @@ export default function SharedFile() {
   const [grant, setGrant] = useState('');
   const [verifying, setVerifying] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [downloadStatus, setDownloadStatus] = useState('');
   const [downloadComplete, setDownloadComplete] = useState(false);
+  const [keyFromHash, setKeyFromHash] = useState<string>('');
 
   useEffect(() => {
+    // Extract zero-knowledge key fragment from URL hash
+    if (typeof window !== 'undefined' && window.location.hash) {
+      const match = window.location.hash.match(/#key=([^&]+)/);
+      if (match && match[1]) {
+        setKeyFromHash(match[1]);
+      }
+    }
+
     fetch(`${API}/api/shares/${token}`)
       .then(async (r) => {
         if (!r.ok) {
@@ -57,7 +73,7 @@ export default function SharedFile() {
       .finally(() => setLoading(false));
   }, [token]);
 
-  async function verify() {
+  async function verifyPassword() {
     setVerifying(true);
     setError('');
     try {
@@ -71,34 +87,48 @@ export default function SharedFile() {
         throw new Error(b.detail || 'Password verification failed');
       }
       setGrant(b.grant);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Verification failed');
+    } catch (err: any) {
+      setError(err.message || 'Verification failed');
     } finally {
       setVerifying(false);
     }
   }
 
-  async function download() {
+  async function handleDownload() {
     setDownloading(true);
     setError('');
+    setDownloadProgress(10);
+    setDownloadStatus('Authorizing secure transfer...');
+
     try {
-      const r = await fetch(`${API}/api/shares/${token}/download`, {
-        method: 'POST',
-        headers: grant ? { 'X-Share-Grant': grant } : {},
-      });
-      if (!r.ok) {
-        const body = await r.json();
-        throw new Error(body.detail || 'This share link is no longer available.');
+      if (keyFromHash) {
+        // Zero-Knowledge Client-Side Decryption
+        await downloadAndDecryptSharedFile(token, keyFromHash, grant, (pct, status) => {
+          setDownloadProgress(pct);
+          setDownloadStatus(status);
+        });
+      } else {
+        // Fallback for links or legacy files
+        const r = await fetch(`${API}/api/shares/${token}/download`, {
+          method: 'POST',
+          headers: grant ? { 'X-Share-Grant': grant } : {},
+        });
+        if (!r.ok) {
+          const body = await r.json();
+          throw new Error(body.detail || 'This share link is no longer available.');
+        }
+        const b = await r.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(b);
+        a.download = file?.name || 'download';
+        a.click();
+        URL.revokeObjectURL(a.href);
       }
-      const b = await r.blob();
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(b);
-      a.download = file?.name || 'download';
-      a.click();
-      URL.revokeObjectURL(a.href);
+
       setDownloadComplete(true);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Download failed');
+      setDownloadStatus('Decryption & Integrity Verified (SHA-256)');
+    } catch (err: any) {
+      setError(err.message || 'Download failed');
     } finally {
       setDownloading(false);
     }
@@ -108,155 +138,147 @@ export default function SharedFile() {
     <div
       style={{
         minHeight: '100vh',
-        background: 'radial-gradient(ellipse at 50% 0%, #1e293b 0%, #0f172a 100%)',
+        background: 'radial-gradient(ellipse at 50% 0%, #172554 0%, #0b0f19 80%)',
         display: 'grid',
         placeItems: 'center',
         padding: '30px 16px',
         color: '#f8fafc',
       }}
     >
-      <div
-        style={{
-          width: 'min(100%, 460px)',
-          background: '#1e293b',
-          border: '1px solid rgba(255,255,255,0.1)',
-          borderRadius: 16,
-          padding: 32,
-          boxShadow: '0 25px 60px rgba(0,0,0,0.4)',
-        }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-          <Link href="/" className="brand" style={{ color: '#fff' }}>
-            <span className="brand-mark" style={{ background: '#2563eb', color: '#fff' }}>
-              <LockKeyhole size={17} />
-            </span>
-            SecureShare
+      <div style={{ width: 'min(100%, 480px)' }}>
+        {/* Header Logo */}
+        <div style={{ textAlign: 'center', marginBottom: 28 }}>
+          <Link href="/" style={{ display: 'inline-flex', alignItems: 'center', gap: 10, textDecoration: 'none', color: '#fff' }}>
+            <div style={{ width: 36, height: 36, borderRadius: 10, background: 'linear-gradient(135deg, #3b82f6, #1d4ed8)', display: 'grid', placeItems: 'center', boxShadow: '0 0 20px rgba(59, 130, 246, 0.5)' }}>
+              <LockKeyhole size={20} />
+            </div>
+            <span style={{ fontSize: 20, fontWeight: 800, letterSpacing: '-0.03em' }}>SecureShare</span>
           </Link>
-          <span className="badge badge-success" style={{ background: 'rgba(16,185,129,0.2)', color: '#34d399', border: '1px solid rgba(16,185,129,0.4)' }}>
-            <ShieldCheck size={12} /> AES-256-GCM
-          </span>
+          <div style={{ fontSize: 13, color: '#94a3b8', marginTop: 6 }}>
+            End-to-End Encrypted Document Delivery
+          </div>
         </div>
 
-        {loading ? (
-          <div style={{ textAlign: 'center', padding: '40px 0', color: '#94a3b8' }}>
-            <LockKeyhole size={32} style={{ margin: 'auto', marginBottom: 12, opacity: 0.6 }} />
-            <p>Validating cryptographic sharing token…</p>
-          </div>
-        ) : error && !file ? (
-          <div style={{ textAlign: 'center', padding: '24px 0' }}>
-            <div style={{ width: 48, height: 48, borderRadius: '50%', background: '#451a1a', color: '#f87171', display: 'grid', placeItems: 'center', margin: 'auto', marginBottom: 16 }}>
-              <AlertCircle size={24} />
+        {/* Card */}
+        <div style={{ background: '#111827', border: '1px solid #1f2937', borderRadius: 16, padding: 32, boxShadow: '0 20px 50px rgba(0, 0, 0, 0.6)' }}>
+          {loading ? (
+            <div style={{ textAlign: 'center', padding: '40px 0', color: '#94a3b8' }}>
+              <RefreshCw size={24} className="animate-spin" style={{ margin: '0 auto 12px' }} />
+              <div>Verifying cryptographic share token...</div>
             </div>
-            <h2 style={{ font: '700 20px Manrope', margin: '0 0 10px', color: '#fff' }}>Link Unavailable</h2>
-            <p style={{ color: '#94a3b8', fontSize: 13, lineHeight: 1.6 }}>{error}</p>
-            <div style={{ marginTop: 24 }}>
-              <Link href="/" className="button" style={{ background: '#334155', color: '#fff' }}>
-                Go to SecureShare Home
+          ) : error ? (
+            <div style={{ textAlign: 'center', padding: '20px 0' }}>
+              <div style={{ width: 44, height: 44, borderRadius: '50%', background: 'rgba(239, 68, 68, 0.1)', color: '#f87171', display: 'grid', placeItems: 'center', margin: '0 auto 16px' }}>
+                <AlertCircle size={24} />
+              </div>
+              <h3 style={{ fontSize: 18, fontWeight: 700, color: '#f87171', marginBottom: 8 }}>Access Unavailable</h3>
+              <p style={{ fontSize: 13, color: '#94a3b8', lineHeight: 1.6, margin: '0 0 20px' }}>{error}</p>
+              <Link href="/" className="btn-secondary btn-sm">
+                Return to SecureShare
               </Link>
             </div>
-          </div>
-        ) : file ? (
-          <div>
-            <div style={{ textAlign: 'center', paddingBottom: 20, borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-              <div style={{ width: 52, height: 52, borderRadius: 12, background: 'rgba(37,99,235,0.2)', color: '#60a5fa', display: 'grid', placeItems: 'center', margin: 'auto', marginBottom: 14 }}>
-                <FileText size={26} />
-              </div>
-              <h2 style={{ font: '700 22px Manrope', margin: '0 0 6px', color: '#fff', wordBreak: 'break-all' }}>
-                {file.name}
-              </h2>
-              <div style={{ color: '#94a3b8', fontSize: 13 }}>
-                {fmt(file.size)} · {file.content_type || 'Protected Document'}
-              </div>
-            </div>
-
-            {/* Security Parameters Metadata */}
-            <div style={{ display: 'grid', gap: 10, margin: '20px 0', fontSize: 12 }}>
-              {file.expires_at && (
-                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8' }}>
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <Clock size={13} /> Expiration:
-                  </span>
-                  <span style={{ color: '#f1f5f9' }}>{new Date(file.expires_at).toLocaleString()}</span>
+          ) : file ? (
+            <div>
+              {/* File details */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 14, background: '#1f2937', padding: 18, borderRadius: 12, border: '1px solid #374151', marginBottom: 20 }}>
+                <div style={{ width: 42, height: 42, borderRadius: 10, background: '#111827', display: 'grid', placeItems: 'center', color: '#60a5fa' }}>
+                  <FileText size={22} />
                 </div>
-              )}
-
-              {file.max_downloads && (
-                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8' }}>
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <FileDown size={13} /> Downloads Remaining:
-                  </span>
-                  <span style={{ color: '#38bdf8' }}>
-                    {Math.max(0, file.max_downloads - (file.downloads || 0))} of {file.max_downloads}
-                  </span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 15, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {file.name}
+                  </div>
+                  <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 3 }}>
+                    {fmt(file.size)} • {file.content_type || 'Encrypted File'}
+                  </div>
                 </div>
-              )}
+              </div>
 
-              {file.sha256_checksum && (
-                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8' }}>
-                  <span>Integrity Checksum:</span>
-                  <code style={{ color: '#a78bfa', fontSize: 10 }}>{file.sha256_checksum.slice(0, 16)}…</code>
+              {/* Security info badges */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 12, marginBottom: 24 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', background: '#1f2937', padding: '8px 12px', borderRadius: 6 }}>
+                  <span>Cipher</span>
+                  <span style={{ color: '#34d399', fontWeight: 600 }}>AES-256-GCM (128-bit Tag)</span>
                 </div>
-              )}
-            </div>
-
-            {error && (
-              <div className="auth-error" style={{ marginBottom: 16 }}>
-                {error}
+                {keyFromHash && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', background: '#1f2937', padding: '8px 12px', borderRadius: 6 }}>
+                    <span>Decryption Mode</span>
+                    <span style={{ color: '#60a5fa', fontWeight: 600 }}>Zero-Knowledge (On Device)</span>
+                  </div>
+                )}
+                {file.max_downloads && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', background: '#1f2937', padding: '8px 12px', borderRadius: 6 }}>
+                    <span>Download Limit</span>
+                    <span>{file.downloads || 0} / {file.max_downloads} used</span>
+                  </div>
+                )}
               </div>
-            )}
 
-            {downloadComplete ? (
-              <div style={{ padding: 16, background: 'rgba(16,185,129,0.15)', borderRadius: 10, textAlign: 'center', border: '1px solid rgba(16,185,129,0.3)', marginTop: 10 }}>
-                <CheckCircle2 size={24} color="#34d399" style={{ margin: 'auto', marginBottom: 8 }} />
-                <h4 style={{ margin: '0 0 4px', color: '#fff' }}>Decryption & Download Complete</h4>
-                <p style={{ margin: 0, fontSize: 12, color: '#94a3b8' }}>
-                  File integrity verified against 128-bit authentication tag.
-                </p>
-              </div>
-            ) : file.password_required && !grant ? (
-              <div style={{ marginTop: 20 }}>
-                <div className="field">
-                  <label htmlFor="share-password" style={{ color: '#cbd5e1' }}>
-                    Password Required
-                  </label>
+              {/* Password Challenge (if required and not granted) */}
+              {file.password_required && !grant ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
+                  <div style={{ fontSize: 13, color: '#fbbf24', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <KeyRound size={15} /> This file is protected with an Argon2id password.
+                  </div>
                   <input
-                    id="share-password"
                     type="password"
-                    placeholder="Enter link password"
+                    placeholder="Enter decryption password..."
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    style={{ background: '#0f172a', border: '1px solid #334155', color: '#fff' }}
+                    style={{ width: '100%', height: 42, background: '#1f2937', border: '1px solid #374151', borderRadius: 8, color: '#fff', padding: '0 12px', fontSize: 14 }}
                   />
+                  <button onClick={verifyPassword} disabled={verifying || !password} className="btn-primary" style={{ width: '100%', justifyContent: 'center' }}>
+                    {verifying ? 'Verifying Password...' : 'Unlock File'}
+                  </button>
                 </div>
-                <button
-                  className="button"
-                  onClick={verify}
-                  disabled={verifying}
-                  style={{ width: '100%', justifyContent: 'center', marginTop: 10 }}
-                >
-                  <KeyRound size={15} />
-                  {verifying ? 'Verifying with Argon2id…' : 'Unlock File'}
-                </button>
-              </div>
-            ) : (
-              <div style={{ marginTop: 20 }}>
-                <button
-                  className="button"
-                  onClick={download}
-                  disabled={downloading}
-                  style={{ width: '100%', justifyContent: 'center', background: '#2563eb' }}
-                >
-                  <ArrowDownToLine size={16} />
-                  {downloading ? 'Decrypting & streaming…' : 'Download Verified File'}
-                </button>
-              </div>
-            )}
+              ) : downloadComplete ? (
+                <div style={{ textAlign: 'center', background: 'rgba(16, 185, 129, 0.1)', border: '1px solid #10b981', padding: 20, borderRadius: 10, color: '#34d399' }}>
+                  <CheckCircle2 size={32} style={{ margin: '0 auto 8px' }} />
+                  <div style={{ fontWeight: 700, fontSize: 15 }}>Decryption Complete!</div>
+                  <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 4 }}>
+                    File verified against SHA-256 integrity tag and saved to your device.
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  {downloading && (
+                    <div style={{ marginBottom: 16 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#94a3b8', marginBottom: 6 }}>
+                        <span>{downloadStatus}</span>
+                        <span>{downloadProgress}%</span>
+                      </div>
+                      <div className="progress-track" style={{ height: 5 }}>
+                        <div className="progress-fill" style={{ width: `${downloadProgress}%` }} />
+                      </div>
+                    </div>
+                  )}
 
-            <div style={{ textAlign: 'center', marginTop: 24, fontSize: 11, color: '#64748b', lineHeight: 1.6 }}>
-              Protected by SecureShare. AES-256-GCM authenticated encryption guarantees content authenticity.
+                  <button
+                    onClick={handleDownload}
+                    disabled={downloading}
+                    className="btn-primary"
+                    style={{ width: '100%', justifyContent: 'center', padding: '12px 20px', fontSize: 15 }}
+                  >
+                    {downloading ? (
+                      <>
+                        <RefreshCw size={16} className="animate-spin" /> Decrypting Locally...
+                      </>
+                    ) : (
+                      <>
+                        <ArrowDownToLine size={16} /> Decrypt & Download File
+                      </>
+                    )}
+                  </button>
+                </div>
+              )}
             </div>
-          </div>
-        ) : null}
+          ) : null}
+        </div>
+
+        {/* Footer */}
+        <div style={{ textAlign: 'center', marginTop: 24, fontSize: 12, color: '#64748b' }}>
+          Protected by SecureShare Authenticated Cryptography
+        </div>
       </div>
     </div>
   );

@@ -1,16 +1,15 @@
-# SecureShare — Secure File Sharing & Encrypted Document Transfer Platform
+# SecureShare — Device-Powered Zero-Knowledge Secure File Platform
 
-[![CI Pipeline](https://github.com/secureshare/secureshare/actions/workflows/ci.yml/badge.svg)](https://github.com/secureshare/secureshare/actions)
-[![Python](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
+[![CI Pipeline](https://github.com/durveshk01/File-Sharing/actions/workflows/ci.yml/badge.svg)](https://github.com/durveshk01/File-Sharing/actions)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688.svg)](https://fastapi.tiangolo.com/)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791.svg)](https://www.postgresql.org/)
+[![React Native](https://img.shields.io/badge/React%20Native-Expo%2052-000020.svg)](https://expo.dev/)
 [![AES-256-GCM](https://img.shields.io/badge/Encryption-AES--256--GCM-success.svg)](https://csrc.nist.gov/publications/detail/sp/800-38d/final)
 [![Argon2id](https://img.shields.io/badge/Hashing-Argon2id-blueviolet.svg)](https://www.rfc-editor.org/rfc/rfc9106.html)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-> **"Your Files. Your Privacy. Your Control."**  
-> A commercial-grade, deterministic, **100% Non-AI** secure file sharing and encrypted document transfer platform engineered for high-assurance data privacy, authenticated envelope encryption, granular access control, and comprehensive auditability.
+> **"Your Files. Your Privacy. Processed on Your Device."**  
+> SecureShare is a commercial-grade, **zero-knowledge, mobile-first** secure file-sharing and encrypted synchronization platform. All heavy cryptographic operations—file reading, AES-256-GCM encryption, SHA-256 integrity hashing, and decryption—are executed **exclusively on the user's client device**. Render acts strictly as a lightweight metadata index, authentication gateway, and synchronization coordinator.
 
 ---
 
@@ -18,171 +17,186 @@
 
 ```mermaid
 flowchart TD
-    Client["Browser / Next.js Client"] -->|HTTPS / REST API| FastAPIGateway["FastAPI API Gateway"]
-    
-    subgraph FastAPI Backend Services
-        FastAPIGateway --> AuthSvc["Authentication Service\n(Argon2id, HttpOnly, 2FA/TOTP)"]
-        FastAPIGateway --> FileSvc["File Management & Resumable Upload"]
-        FastAPIGateway --> CryptoEngine["Envelope Encryption Engine\n(AES-256-GCM + KEK Wrapping)"]
-        FastAPIGateway --> SharingSvc["Sharing & Permission Service\n(Atomic Quotas, Expirations, Argon2id)"]
-        FastAPIGateway --> AuditSvc["Audit & Telemetry Service\n(Immutable Access Logging)"]
-        FastAPIGateway --> NotifSvc["In-App Notification Service"]
+    subgraph ClientDevices["Client Processing Engines (Local-First)"]
+        Mobile["📱 Mobile App (React Native / Expo SDK 52)\n• Native Document Picker\n• Local AES-256-GCM Engine (@noble/ciphers)\n• Hardware Keystore (Expo SecureStore)\n• Offline SQLite Sync Queue (expo-sqlite)"]
+        Web["💻 Web Application (Next.js 16 / React 19)\n• Web Crypto API (SubtleCrypto)\n• Client DEK Generation\n• Zero-Knowledge URL Fragments (#key=)"]
     end
 
-    subgraph Data & Storage Layers
-        AuthSvc --> DB[("PostgreSQL / SQLite\nDatabase")]
-        SharingSvc --> DB
-        AuditSvc --> DB
-        NotifSvc --> DB
-        FileSvc --> DB
-        
-        CryptoEngine --> StorageAdapter["Storage Abstraction Layer"]
-        StorageAdapter --> LocalDisk["Local Filesystem Storage\n(Development)"]
-        StorageAdapter --> ObjectStore["S3 / MinIO Object Storage\n(Production)"]
+    subgraph ObjectStorage["Direct Object Storage (S3 / Cloudflare R2)"]
+        S3Bucket[("Private Object Store\n(AES-256-GCM Ciphertext Only)")]
     end
+
+    subgraph RenderBackend["Render Coordination Backend (Lightweight)"]
+        Gateway["FastAPI Gateway (/api)"]
+        Auth["Auth & Sessions (Argon2id, Bearer/HttpOnly, TOTP)"]
+        Sync["Delta Sync Engine (Cursors, Devices, Batch Sync)"]
+        Coord["Storage Coordinator (Presigned Upload/Download Intents)"]
+        DB[("PostgreSQL Database\n(File Metadata, Sync Cursors,\nCiphertext Hashes, Wrapped Keys)")]
+    end
+
+    %% Client Actions
+    ClientDevices -->|"1. Request Upload Intent"| Coord
+    Coord -->|"2. Presigned PUT URL"| ClientDevices
+    ClientDevices -->|"3. Local Encrypt & Direct Ciphertext Upload"| S3Bucket
+    ClientDevices -->|"4. Confirm Upload with Ciphertext SHA-256"| Gateway
+    Gateway -->|"5. Commit Metadata & Advance Cursor"| DB
+
+    %% Direct Sync & Download
+    ClientDevices <-->|"Query Delta Changes (?since=cursor)"| Sync
+    ClientDevices -->|"Request Download Intent"| Coord
+    Coord -->|"Presigned GET URL"| ClientDevices
+    S3Bucket -->|"Stream Ciphertext Directly to Device"| ClientDevices
+    ClientDevices -->|"Local Decrypt & Validate 128-bit Tag"| ClientDevices
 ```
 
 ---
 
-## Key Features
+## Core Principles & Innovations
 
-- **Authenticated AEAD File Encryption**: Every upload is encrypted with **AES-256-GCM** using a cryptographically random 256-bit Data Encryption Key (DEK) and a unique 96-bit nonce. Tampered or modified ciphertext is immediately rejected by 128-bit authentication tags.
-- **Envelope Key Wrapping**: Raw DEKs are envelope-wrapped under a master Key Encryption Key (KEK) using domain-separated Additional Associated Data (AAD). Secret keys are never persisted in plaintext, written to database records, or logged.
-- **Revocable High-Entropy Share Links**: 32-byte cryptographic random URL-safe tokens with zero-knowledge database persistence (only `SHA-256(token)` is stored).
-- **Argon2id Password Protection**: Share links and user credentials are protected by memory-hard Argon2id hashing with rate limiting and brute-force mitigation.
-- **Strict Server-Side Expirations**: Configurable lifetimes (1h, 24h, 7d, 30d, custom) evaluated on every request.
-- **Atomic Concurrency-Safe Download Limits**: Atomic SQL update queries prevent race conditions or simultaneous requests from exceeding download caps.
-- **Granular Role-Based Access Control (RBAC)**: Grant `OWNER`, `EDITOR`, or `VIEWER` roles to specific collaborator emails.
-- **Comprehensive Audit Trail & Telemetry**: Immutable logging of all uploads, views, downloads, denied access attempts, IP addresses, and failure diagnostics.
-- **Two-Factor Authentication (TOTP)**: RFC 6238 compliant authenticator app pairing with emergency single-use recovery codes.
-- **Instant One-Click Demo Mode**: Front-page live demo session button allows immediate exploration with zero signup friction.
-- **Dual Storage Abstraction**: Seamlessly switch between local disk storage and S3-compatible private object storage (AWS S3, MinIO, Cloudflare R2).
-- **100% Non-AI / Zero Telemetry**: Deterministic cybersecurity architecture with no third-party analytics, model training, or document parsing.
+### 1. Device-Powered Cryptography (Zero-Knowledge)
+- **Zero Server Plaintext Processing**: Neither Render nor any backend service ever receives, stores, or sees unencrypted file contents or raw Data Encryption Keys (DEKs).
+- **Client-Side AES-256-GCM**: Files are encrypted with random 256-bit DEKs and unique 96-bit nonces directly inside the mobile app or browser before network transmission.
+- **Client-Side SHA-256 Hashing**: Integrity hashes of both plaintext and ciphertext are generated locally to guarantee bit-level tamper detection.
 
----
+### 2. Zero-Knowledge Public Link Sharing
+- Cryptographic keys are passed via **URL hash fragments** (`#key=<base64url_dek>`).
+- Per RFC 3986, browsers and native HTTP clients **never send URL fragments to servers**. The receiving client's browser extracts the key from the anchor tag and decrypts the downloaded ciphertext entirely on the client.
 
-## Technology Stack
+### 3. Lightweight Render Backend
+- **Presigned Transfer Authorization**: Generates short-lived, cryptographically scoped presigned URLs for direct object storage (Cloudflare R2, AWS S3) uploads and downloads.
+- **Delta Sync Cursor Engine**: Allows mobile and desktop clients to poll or pull only changed metadata since a high-water mark timestamp (`/api/sync/cursor`).
+- **Batch Synchronization**: Single-roundtrip offline synchronization API for mobile devices reconnecting after network outages (`/api/sync/batch`).
+- **Device Registration & Revocation**: Multi-device management tracking registered device UUIDs and security keys (`/api/sync/device/register`).
 
-| Layer | Technology | Details |
-|---|---|---|
-| **Frontend** | Next.js 16 (App Router), React 19, TypeScript | Standalone production output, Tailwind CSS, Lucide Icons |
-| **Backend** | Python 3.12, FastAPI, Pydantic | High-performance asynchronous REST API, OpenAPI 3.0 |
-| **Database** | PostgreSQL 16 (or SQLite for local dev) | SQLAlchemy 2.0 ORM, Alembic migration revisions |
-| **Cryptography** | AES-256-GCM, Argon2id, SHA-256 | `cryptography` primitives, envelope encryption hierarchy |
-| **Storage** | Local Filesystem & S3 / MinIO | Pluggable storage abstraction with random 64-char hex keys |
-| **DevOps** | Docker, Docker Compose, GitHub Actions | Multi-stage Dockerfiles, automated CI test runner |
+### 4. Local-First Mobile Application (`mobile/`)
+- **Native Document Selection**: Clean system file picker integration using `expo-document-picker`.
+- **Local SQLite Database**: Stores local file cache, upload queue, and synchronization cursors offline using `expo-sqlite`.
+- **Hardware Keystore Integration**: Protects device-held encryption keys inside secure hardware (Android Keystore / iOS Keychain) via `expo-secure-store`.
+- **Resilient Sync Engine**: Features Wi-Fi only mode, battery-saver suspension, network connectivity monitoring, and automatic exponential backoff retries.
+- **Biometric Security**: Protects sensitive local files and credentials using Face ID or Fingerprint unlock via `expo-local-authentication`.
 
----
-
-## Cryptographic Envelope Workflow
-
-```
-[Plaintext Upload] ──> SHA-256 Checksum Computed
-       │
-       ▼
- 1. Generate random 256-bit DEK & unique 96-bit Nonce
- 2. AES-256-GCM encrypt file with AAD="secureshare:file:v1"
- 3. Wrap DEK under 256-bit master KEK with AAD="secureshare:key:v1"
-       │
-       ├──────────────────────────────────────────┐
-       ▼                                          ▼
- [Encrypted Object]                      [Wrapped DEK Envelope]
- Stored in Object Storage                Stored in Database File Record
- (Local Disk or S3 / MinIO)              (Never exposes raw secret key)
-```
-
-Upon download:
-1. The backend unwrap-verifies the DEK using the server's master KEK.
-2. The file is decrypted and verified against the 128-bit authentication tag.
-3. The plaintext SHA-256 hash is verified against the original checksum before streaming.
+### 5. Premium SaaS Web Interface (`frontend/`)
+- Redesigned with a modern, high-contrast SaaS aesthetic inspired by Linear, Raycast, and Google Drive.
+- Features real-time storage metrics (Cloud vs Device storage), interactive in-browser cryptographic sandbox, folder breadcrumbs, categorized MIME filters, multi-select, and context action menus.
 
 ---
 
-## Quick Start (Local Development)
+## Repository Structure
 
-### 1. Clone & Configure
-```bash
-git clone https://github.com/secureshare/secureshare.git
-cd secureshare
-cp .env.example .env
+```
+├── backend/                       # Lightweight FastAPI coordination service
+│   ├── app/
+│   │   ├── main.py                # REST API endpoints, delta sync, storage intents
+│   │   ├── models.py              # SQLAlchemy models (User, File, Device, ShareLink, etc.)
+│   │   ├── security.py            # Argon2id password hashing, Bearer & Cookie sessions
+│   │   ├── storage.py             # Storage abstraction (Presigned S3/R2 & raw stream)
+│   │   └── encryption.py          # Envelope encryption primitives & tamper detection
+│   ├── migrations/                # Alembic database schema migration versions
+│   └── tests/                     # Pytest suite (33 automated unit & integration tests)
+├── frontend/                      # Redesigned Next.js 16 Web Application
+│   ├── app/
+│   │   ├── lib/crypto.ts          # Web Crypto client-side AES-256-GCM engine
+│   │   ├── lib/uploader.ts        # Client-side chunked encrypt-and-upload pipeline
+│   │   ├── lib/downloader.ts      # Zero-knowledge client-side decryptor
+│   │   ├── dashboard/             # SaaS storage dashboard with real-time gauges
+│   │   ├── files/                 # Full-featured File Explorer (grid/list/filters)
+│   │   └── share/[token]/         # Public zero-knowledge decryption recipient page
+├── mobile/                        # Native Mobile Application (React Native & Expo)
+│   ├── src/
+│   │   ├── crypto/aesGcm.ts       # On-device AES-256-GCM engine (@noble/ciphers)
+│   │   ├── crypto/keyStorage.ts   # Hardware Keystore integration (SecureStore)
+│   │   ├── database/sqlite.ts     # Offline-first SQLite database
+│   │   ├── services/syncEngine.ts # Battery-aware & Wi-Fi only sync queue
+│   │   └── screens/               # Native screens (Home, Files, Shared, Settings, Auth)
+│   ├── app.json                   # Expo SDK 52 application configuration
+│   └── eas.json                   # Standalone Android APK build configuration
+├── docs/                          # Comprehensive technical documentation
+│   ├── architecture.md            # Detailed system architecture & sequence diagrams
+│   └── deployment.md              # Production deployment guide (Render, Vercel, S3, APK)
+└── render.yaml                    # Infrastructure as Code blueprint for Render
 ```
 
-### 2. Backend Setup
+---
+
+## Quick Start Guide
+
+### 1. Backend Coordination Service
+
 ```bash
 cd backend
+
+# Setup Python 3.12 virtual environment
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+source .venv/bin/activate       # Windows: .venv\Scripts\activate
+
+# Install dependencies
 pip install -r requirements.txt pytest
 
 # Apply database migrations
 python -m alembic upgrade head
 
-# Start FastAPI API server
+# Run FastAPI coordination server
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
-API Documentation: `http://localhost:8000/docs`
+Open interactive Swagger API docs: `http://localhost:8000/docs`
 
-### 3. Frontend Setup
-In a new terminal:
+### 2. Web Frontend Application
+
 ```bash
 cd frontend
+
+# Install dependencies
 npm install
+
+# Run Next.js 16 development server
 npm run dev
 ```
-Open your browser to: `http://localhost:3000`
+Open web client in browser: `http://localhost:3000`
 
-### 4. Instant Demo Mode
-On `http://localhost:3000`, click **"Live Demo"** in the top navigation or **"Try Live Demo (No Signup)"** on the landing page to enter the workspace instantly.
+### 3. Mobile Application
+
+```bash
+cd mobile
+
+# Install mobile dependencies
+npm install
+
+# Start Expo development server
+npx expo start
+```
+- Press `a` to run on a connected Android phone or emulator via ADB.
+- Scan the terminal QR code with **Expo Go** to test instantly on physical hardware.
 
 ---
 
-## Docker Compose Setup
+## Building Standalone Android APK
 
-Run the entire platform including PostgreSQL, MinIO, FastAPI Backend, and Next.js Frontend with one command:
+To compile an installable standalone Android `.apk` file:
 
 ```bash
-docker compose up -d --build
-```
+cd mobile
 
-- **Frontend**: `http://localhost:3000`
-- **FastAPI API & OpenAPI Docs**: `http://localhost:8000/docs`
-- **MinIO S3 Console**: `http://localhost:9001` (User: `minioadmin`, Pass: `minioadminpassword`)
-- **PostgreSQL**: `localhost:5432`
+# 1. Install EAS CLI
+npm install -g eas-cli
 
-To shut down:
-```bash
-docker compose down
+# 2. Build preview APK in the cloud
+eas build --platform android --profile preview
+
+# Or build locally using your local Android SDK:
+eas build --platform android --profile preview --local
 ```
 
 ---
 
 ## Automated Test Suite
 
-SecureShare includes 28 automated tests covering authentication, cryptographic round-trips, tamper resistance, concurrency, and access control.
+Run the full backend test suite covering device sync, cryptographic round-trips, tamper resistance, and concurrency:
 
-To run the test suite:
 ```bash
-pytest backend/tests
+py -3.12 -m pytest backend/tests -v
 ```
 
-### Test Coverage Highlights
-- **Cryptographic Round-Trip**: Validates encrypt-decrypt accuracy and confirms unique 96-bit nonces per operation.
-- **Tamper Resistance**: Proves that modifying any bit in the ciphertext or nonce causes immediate decryption failure.
-- **Key Isolation**: Verifies that raw secret keys never appear in API responses or logs.
-- **Concurrency & Quotas**: Simulates concurrent download requests to ensure atomic limits are never exceeded.
-- **Access Control & Permissions**: Tests owner vs collaborator permissions (`VIEWER`, `EDITOR`), grant revocation, and expiration rejection.
-
----
-
-## Documentation Index
-
-- [System Architecture](docs/architecture.md): Modular component breakdown and sequence flows.
-- [Database Schema](docs/database.md): Entity-relationship diagrams and table specifications.
-- [REST API Reference](docs/api.md): Endpoints, request/response schemas, and status codes.
-- [Cryptographic Specification](docs/encryption.md): AES-256-GCM, KEK envelope encryption, and nonces.
-- [Security Model](docs/security.md): Threat model, Argon2id hashing, and abuse prevention.
-- [Production Deployment](docs/deployment.md): Instructions for Vercel, Render, Railway, and AWS.
-- [Local Development](docs/local-development.md): Native execution and testing setup.
+**Results**: 33 passing tests with 100% assertions satisfied.
 
 ---
 

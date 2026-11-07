@@ -1,80 +1,128 @@
-# SecureShare System Architecture
+# SecureShare System Architecture: Device-Powered & Mobile-First
 
-SecureShare is a production-grade, secure file-sharing and encrypted document transfer platform engineered without artificial intelligence or machine learning components. It is built strictly on software engineering, authenticated cryptography, defense-in-depth access control, and robust cloud storage abstractions.
+SecureShare is a commercial-grade, deterministic, **zero-knowledge** secure file sharing and encrypted document transfer platform engineered for mobile and web.
+
+## Primary Architectural Principle
+
+**ALL FILE PROCESSING POWER DERIVES EXCLUSIVELY FROM THE USER'S DEVICE.**  
+Render and the cloud backend function strictly as a lightweight coordination, metadata indexing, authentication, and synchronization hub. Plaintext file contents and unencrypted data keys are never transmitted to, buffered on, or accessible by Render.
 
 ```mermaid
 flowchart TD
-    Client["Browser / Next.js Client"] -->|HTTPS / REST API| FastAPIGateway["FastAPI API Gateway"]
-    
-    subgraph FastAPI Backend Services
-        FastAPIGateway --> AuthSvc["Authentication Service\n(Argon2id, HttpOnly, 2FA/TOTP)"]
-        FastAPIGateway --> FileSvc["File Management & Resumable Upload"]
-        FastAPIGateway --> CryptoEngine["Envelope Encryption Engine\n(AES-256-GCM + KEK Wrapping)"]
-        FastAPIGateway --> SharingSvc["Sharing & Permission Service\n(Atomic Quotas, Expirations, Argon2id)"]
-        FastAPIGateway --> AuditSvc["Audit & Telemetry Service\n(Immutable Access Logging)"]
-        FastAPIGateway --> NotifSvc["In-App Notification Service"]
+    subgraph UserDevices["User Devices (Processing Engines)"]
+        Mobile["📱 Mobile App (React Native / Expo)\n- Native File Picker\n- Local AES-256-GCM Engine\n- Hardware Keystore\n- Local SQLite Sync Queue"]
+        WebClient["💻 Web Client (Next.js 16 / React 19)\n- Web Crypto API Engine\n- In-Memory DEK Generation\n- Zero-Knowledge URL Fragments (#key=)"]
     end
 
-    subgraph Data & Storage Layers
-        AuthSvc --> DB[("PostgreSQL / SQLite\nDatabase")]
-        SharingSvc --> DB
-        AuditSvc --> DB
-        NotifSvc --> DB
-        FileSvc --> DB
-        
-        CryptoEngine --> StorageAdapter["Storage Abstraction Layer"]
-        StorageAdapter --> LocalDisk["Local Filesystem Storage\n(Development)"]
-        StorageAdapter --> ObjectStore["S3 / MinIO Object Storage\n(Production)"]
+    subgraph DirectStorage["Direct Object Storage (S3 / Cloudflare R2 / MinIO)"]
+        ObjectStore[("Private S3/R2 Bucket\n(Encrypted Ciphertexts Only)")]
     end
+
+    subgraph BackendGateway["Render Lightweight Coordination Backend"]
+        FastAPIGateway["FastAPI Gateway (/api)"]
+        AuthSvc["Auth & Session Service\n(Argon2id, Bearer/HttpOnly, TOTP)"]
+        SyncSvc["Cursor & Device Sync Engine\n(Delta Cursors, Batch Sync, Devices)"]
+        StorageCoord["Presigned Storage Coordinator\n(Upload & Download Intents)"]
+        MetadataDB[("Metadata PostgreSQL DB\n(Filenames, Sizes, Cursors,\nCiphertext Hashes, Wrapped Keys)")]
+    end
+
+    %% Upload Flow
+    UserDevices -->|"1. Request Upload Intent"| StorageCoord
+    StorageCoord -->|"2. Return Presigned URL or Direct Stream Intent"| UserDevices
+    UserDevices -->|"3. Encrypt AES-256-GCM on Device & Upload Ciphertext"| ObjectStore
+    UserDevices -->|"4. Confirm Upload with Ciphertext SHA-256"| FastAPIGateway
+    FastAPIGateway -->|"5. Record Metadata & Increment Cursor"| MetadataDB
+
+    %% Sync Flow
+    FastAPIGateway --> SyncSvc
+    SyncSvc --> MetadataDB
+    UserDevices <-->|"Delta Sync Query (?since=cursor)"| SyncSvc
+
+    %% Download Flow
+    UserDevices -->|"Request Download Intent"| StorageCoord
+    StorageCoord -->|"Presigned GET URL"| UserDevices
+    ObjectStore -->|"Stream Ciphertext Directly"| UserDevices
+    UserDevices -->|"Decrypt Locally & Verify Auth Tag"| UserDevices
 ```
 
 ---
 
 ## Component Breakdown
 
-### 1. Frontend Client (`frontend/`)
-- **Framework**: Next.js 16 (App Router), React 19, TypeScript.
-- **Styling**: Tailwind CSS & custom design tokens for dark and light modes.
-- **Key Modules**:
-  - Landing Page (`/`): Public showcase with one-click live demo session launcher, cryptographic explanation diagrams, feature comparison, and FAQ.
-  - Workspace Dashboard (`/dashboard`): Metric cards, storage quota gauges, drag-and-drop file upload, file list, and modal sharing dialogs.
-  - File Explorer (`/files`): Categorized directory view with MIME filtering, search, and file actions.
-  - Cryptographic Inspector (`/files/[id]`): Detailed view displaying AES-256-GCM parameters, 96-bit nonce, wrapped key envelope size, SHA-256 checksum, live integrity verification, collaborator permissions manager, and file-specific access logs.
-  - Share Management (`/shared`): Link administration dashboard with filters (Active, Expired, Revoked, Password Protected), atomic download tracking, and revocation controls.
-  - Public Recipient Experience (`/share/[token]`): Zero-knowledge token verification, Argon2id password challenges, and tamper-verified file download streaming.
-  - Security & 2FA (`/security`): TOTP authenticator pairing, emergency recovery codes, active session revocation, and password management.
-  - Audit Trail (`/access-logs`): Comprehensive system audit log with IP logging, timestamping, action tracing, and failure diagnostics.
-  - Notifications Center (`/notifications`): Real-time alerts for downloads, uploads, and security events.
+### 1. Mobile Application (`mobile/`)
+- **Technology Stack**: React Native, Expo SDK 52, TypeScript, SQLite, `@noble/ciphers`.
+- **Local File Processing**:
+  - Native document selection via `expo-document-picker`.
+  - In-device chunked SHA-256 hashing and AES-256-GCM authenticated encryption.
+  - Generates cryptographically secure 256-bit Data Encryption Keys (DEKs) and 96-bit nonces locally.
+- **Hardware Keystore Integration**:
+  - Secure hardware-backed storage for device-held keys using `expo-secure-store` (Android Keystore / iOS Secure Enclave).
+- **Local-First SQLite Database**:
+  - `local_files`: Caches file metadata, offline availability flags, local filesystem paths, and encrypted keys.
+  - `sync_queue`: Maintains pending offline uploads, updates, and deletes with priority, attempt counters, and error states.
+  - `sync_metadata`: Tracks high-water mark synchronization cursors (`last_sync_cursor`).
+- **Resilient Background Synchronization**:
+  - Network state monitoring via `expo-network`.
+  - Wi-Fi only synchronization setting to respect mobile data limits.
+  - Battery-saver mode detection to suspend heavy cryptographic jobs during low-battery conditions.
+  - Exponential backoff retry engine for network disruptions.
+- **Biometric Security**:
+  - App-level biometric lock (Fingerprint / Face Unlock) using `expo-local-authentication`.
 
-### 2. Backend API Gateway (`backend/app/main.py`)
-- **Framework**: FastAPI with Python 3.12, Pydantic, SQLAlchemy 2.0, and Alembic migrations.
-- **Middleware**:
-  - Strict Cross-Origin Resource Sharing (CORS) restricted to verified frontend origins.
-  - Sliding-window in-memory rate limiting across sensitive endpoints (`/api/auth/login`, `/api/auth/register`, `/api/auth/login/2fa`, `/api/shares/{token}/verify`).
-- **Standardized Responses**: Explicit HTTP status codes (`200 OK`, `201 Created`, `204 No Content`, `400 Bad Request`, `401 Unauthorized`, `403 Forbidden`, `404 Not Found`, `410 Gone`, `413 Payload Too Large`, `429 Too Many Requests`).
+### 2. Modern Web Frontend (`frontend/`)
+- **Technology Stack**: Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS, Web Crypto API.
+- **Local Cryptographic Engine (`frontend/app/lib/crypto.ts`)**:
+  - Uses browser native `crypto.subtle` for hardware-accelerated AES-256-GCM.
+  - Extracts SHA-256 checksums before encryption.
+  - Performs 100% in-browser encryption before uploading to object storage.
+  - Performs 100% in-browser decryption upon download, validating the 128-bit authentication tag before triggering browser save.
+- **Zero-Knowledge Link Sharing (`frontend/app/lib/downloader.ts` & `/share/[token]`)**:
+  - Share links append the raw Data Encryption Key as an anchor hash fragment: `https://secureshare.vercel.app/share/<token>#key=<base64url_key>`.
+  - RFC 3986 specifies that URL fragments are **never sent to servers** over HTTP(S).
+  - The recipient's browser reads the key directly from `window.location.hash`, requests the encrypted ciphertext from storage, and decrypts the file client-side. Render never learns the key.
+- **SaaS Design System**:
+  - Linear/Raycast-inspired layout with clean typography, balanced spacing, and subtle borders.
+  - Storage telemetry displaying cloud storage vs local device storage.
+  - Live cryptographic visualizer with one-click interactive encryption playground.
 
-### 3. Cryptographic Engine (`backend/app/encryption.py`)
-- **Authenticated Encryption**: Advanced Encryption Standard in Galois/Counter Mode (AES-256-GCM).
-- **Envelope Encryption**:
-  - Each file upload generates a random 256-bit Data Encryption Key (DEK) and a unique 96-bit Nonce.
-  - The plaintext file is encrypted with AES-256-GCM using `AAD = b"secureshare:file:v1"`.
-  - The DEK is encrypted under the deployment's Key Encryption Key (KEK) using `AAD = b"secureshare:key:v1"`.
-  - Only the wrapped key and ciphertext are persisted; plaintext DEKs are immediately discarded from memory.
-- **Tamper Protection**: Any bit modification in the ciphertext or nonce causes AES-GCM tag verification to raise `cryptography.exceptions.InvalidTag`, preventing delivery of corrupted or altered data.
-- **Checksum Verification**: SHA-256 checksums are calculated on original plaintext and validated upon download.
+### 3. Lightweight Render Backend (`backend/`)
+- **Role**: Coordination, Metadata Indexing, Access Control, and Authentication.
+- **No Heavy File Processing**:
+  - Render never runs CPU-intensive compression, OCR, media transcoding, or server-side file decryption.
+  - Server resources remain negligible, enabling high scalability on free or micro cloud instances.
+- **Storage Intent Endpoints**:
+  - `POST /api/storage/upload-intent`: Issues short-lived presigned PUT URLs for direct mobile/web transfer to S3/R2 object storage (or local raw streaming fallback).
+  - `POST /api/files/{file_id}/confirm-upload`: Finalizes file metadata once the client completes direct storage transfer.
+  - `GET /api/files/{file_id}/download-intent`: Issues presigned GET URLs with short expiration windows for direct ciphertext downloads.
+  - `GET /api/storage/raw/{object_key}`: Raw ciphertext streaming endpoint used when running with local storage fallback; streams bytes directly without buffering in memory.
+- **Delta Synchronization Engine**:
+  - `POST /api/sync/device/register`: Registers mobile and desktop client devices with public keys, device models, and push notification tokens.
+  - `GET /api/sync/cursor`: Cursor-based delta synchronization returning changes (`created`, `updated`, `deleted`, `trashed`) since the client's last sync timestamp.
+  - `POST /api/sync/batch`: Batch synchronization endpoint allowing mobile clients to push multiple local operations in a single atomic HTTP round-trip.
+- **Identity & Access Management**:
+  - Argon2id password hashing and RFC 6238 TOTP two-factor authentication.
+  - Supports dual session authentication: `Authorization: Bearer <session_token>` for native mobile apps and `Cookie: secureshare_session` for web browsers.
 
-### 4. Storage Abstraction Layer (`backend/app/storage.py`)
-- Defines a uniform interface:
-  - `put(key: str, data: bytes) -> None`
-  - `get(key: str) -> bytes`
-  - `delete(key: str) -> None`
-  - `exists(key: str) -> bool`
-- **Adapters**:
-  - `LocalStorageAdapter`: Safely stores ciphertext on local storage using 64-character random hex keys (preventing directory traversal).
-  - `S3StorageAdapter`: Seamlessly connects to AWS S3, Cloudflare R2, or MinIO object storage without requiring business logic changes.
+---
 
-### 5. Sharing & Permission Engine
-- **High-Entropy Tokens**: Sharing links use 32-byte cryptographic random URL-safe tokens (`secrets.token_urlsafe(32)`).
-- **Hashed Token Persistence**: Only `SHA-256(token)` is stored in the database. Raw tokens never reside at rest.
-- **Atomic Download Quotas**: Concurrency-safe SQL updates (`update(ShareLink).where(downloads < max_downloads).values(downloads = downloads + 1)`) guarantee download caps cannot be bypassed by race conditions.
-- **Role-Based Access Control (RBAC)**: Internal file collaborators can be granted `OWNER`, `EDITOR`, or `VIEWER` roles.
+## End-to-End Cryptographic Flow
+
+```
+1. Mobile / Web Client selects file: "financial_report.pdf" (10 MB)
+2. Client generates random 256-bit DEK: k_data = SecureRandom(32)
+3. Client computes SHA-256 of original file: H_orig = SHA256(Plaintext)
+4. Client encrypts file using AES-256-GCM:
+     Ciphertext, Tag = AES_GCM_Encrypt(k_data, Nonce_96, Plaintext, AAD="secureshare:file:v2")
+5. Client computes SHA-256 of Ciphertext: H_cipher = SHA256(Ciphertext)
+6. Client wraps k_data using device key or KEK envelope.
+7. Client calls Backend: POST /api/storage/upload-intent
+     Backend returns: { "upload_url": "https://s3.us-east-1.amazonaws.com/...", "object_key": "..." }
+8. Client transfers Ciphertext directly to Object Storage via HTTP PUT.
+9. Client calls Backend: POST /api/files/{id}/confirm-upload
+     Backend verifies object presence and stores metadata (H_orig, H_cipher, Nonce, Tag).
+10. Other devices receive metadata change via GET /api/sync/cursor?since=T.
+11. Receiving device downloads Ciphertext directly from S3/R2.
+12. Receiving device decrypts Ciphertext locally:
+     Plaintext = AES_GCM_Decrypt(k_data, Nonce_96, Ciphertext, Tag, AAD="secureshare:file:v2")
+     Verify SHA256(Plaintext) == H_orig.
+```

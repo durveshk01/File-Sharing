@@ -2,6 +2,7 @@ import io
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Any
 from app.core.config import settings
 
 class StorageAdapter(ABC):
@@ -23,6 +24,42 @@ class StorageAdapter(ABC):
     @abstractmethod
     def exists(self, key: str) -> bool:
         """Check if key exists."""
+        pass
+
+    @abstractmethod
+    def generate_presigned_upload(
+        self, object_key: str, content_type: str = "application/octet-stream", expires_in: int = 3600
+    ) -> dict[str, Any]:
+        """Generate direct upload authorization (S3 presigned PUT or direct raw endpoint)."""
+        pass
+
+    @abstractmethod
+    def generate_presigned_download(
+        self, object_key: str, filename: str | None = None, expires_in: int = 3600
+    ) -> dict[str, Any]:
+        """Generate direct download authorization (S3 presigned GET or direct raw endpoint)."""
+        pass
+
+    @abstractmethod
+    def initiate_multipart_upload(self, object_key: str, content_type: str = "application/octet-stream") -> str:
+        """Initiate direct multipart upload."""
+        pass
+
+    @abstractmethod
+    def generate_presigned_part_upload(
+        self, object_key: str, upload_id: str, part_number: int, expires_in: int = 3600
+    ) -> str:
+        """Generate presigned URL for a single part."""
+        pass
+
+    @abstractmethod
+    def complete_multipart_upload(self, object_key: str, upload_id: str, parts: list[dict[str, Any]]) -> None:
+        """Complete multipart upload."""
+        pass
+
+    @abstractmethod
+    def abort_multipart_upload(self, object_key: str, upload_id: str) -> None:
+        """Abort multipart upload."""
         pass
 
 
@@ -54,6 +91,63 @@ class LocalStorage(StorageAdapter):
 
     def exists(self, key: str) -> bool:
         return self._resolve(key).exists()
+
+    def generate_presigned_upload(
+        self, object_key: str, content_type: str = "application/octet-stream", expires_in: int = 3600
+    ) -> dict[str, Any]:
+        return {
+            "mode": "direct_backend",
+            "upload_url": f"/api/storage/raw/{object_key}",
+            "method": "PUT",
+            "headers": {"Content-Type": "application/octet-stream"},
+            "expires_in": expires_in,
+        }
+
+    def generate_presigned_download(
+        self, object_key: str, filename: str | None = None, expires_in: int = 3600
+    ) -> dict[str, Any]:
+        return {
+            "mode": "direct_backend",
+            "download_url": f"/api/storage/raw/{object_key}",
+            "method": "GET",
+            "expires_in": expires_in,
+        }
+
+    def initiate_multipart_upload(self, object_key: str, content_type: str = "application/octet-stream") -> str:
+        upload_id = f"local_{object_key}"
+        parts_dir = self.root / "_parts" / upload_id
+        parts_dir.mkdir(parents=True, exist_ok=True)
+        return upload_id
+
+    def generate_presigned_part_upload(
+        self, object_key: str, upload_id: str, part_number: int, expires_in: int = 3600
+    ) -> str:
+        return f"/api/storage/raw/{object_key}/part/{part_number}?upload_id={upload_id}"
+
+    def complete_multipart_upload(self, object_key: str, upload_id: str, parts: list[dict[str, Any]]) -> None:
+        parts_dir = self.root / "_parts" / upload_id
+        target = self._resolve(object_key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "wb") as out_f:
+            for p in sorted(parts, key=lambda x: x["PartNumber"]):
+                part_file = parts_dir / f"part_{p['PartNumber']}"
+                if part_file.exists():
+                    out_f.write(part_file.read_bytes())
+                    part_file.unlink()
+        try:
+            parts_dir.rmdir()
+        except OSError:
+            pass
+
+    def abort_multipart_upload(self, object_key: str, upload_id: str) -> None:
+        parts_dir = self.root / "_parts" / upload_id
+        if parts_dir.exists():
+            for f in parts_dir.glob("*"):
+                f.unlink(missing_ok=True)
+            try:
+                parts_dir.rmdir()
+            except OSError:
+                pass
 
 
 class S3Storage(StorageAdapter):
@@ -109,6 +203,78 @@ class S3Storage(StorageAdapter):
             return True
         except ClientError:
             return False
+
+    def generate_presigned_upload(
+        self, object_key: str, content_type: str = "application/octet-stream", expires_in: int = 3600
+    ) -> dict[str, Any]:
+        url = self.client.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": self.bucket_name, "Key": object_key, "ContentType": content_type},
+            ExpiresIn=expires_in,
+        )
+        return {
+            "mode": "direct_s3",
+            "upload_url": url,
+            "method": "PUT",
+            "headers": {"Content-Type": content_type},
+            "expires_in": expires_in,
+        }
+
+    def generate_presigned_download(
+        self, object_key: str, filename: str | None = None, expires_in: int = 3600
+    ) -> dict[str, Any]:
+        params = {"Bucket": self.bucket_name, "Key": object_key}
+        if filename:
+            params["ResponseContentDisposition"] = f'attachment; filename="{filename.replace(chr(34), "")}"'
+        url = self.client.generate_presigned_url(
+            "get_object",
+            Params=params,
+            ExpiresIn=expires_in,
+        )
+        return {
+            "mode": "direct_s3",
+            "download_url": url,
+            "method": "GET",
+            "expires_in": expires_in,
+        }
+
+    def initiate_multipart_upload(self, object_key: str, content_type: str = "application/octet-stream") -> str:
+        resp = self.client.create_multipart_upload(
+            Bucket=self.bucket_name,
+            Key=object_key,
+            ContentType=content_type,
+            ServerSideEncryption="AES256",
+        )
+        return resp["UploadId"]
+
+    def generate_presigned_part_upload(
+        self, object_key: str, upload_id: str, part_number: int, expires_in: int = 3600
+    ) -> str:
+        return self.client.generate_presigned_url(
+            "upload_part",
+            Params={
+                "Bucket": self.bucket_name,
+                "Key": object_key,
+                "UploadId": upload_id,
+                "PartNumber": part_number,
+            },
+            ExpiresIn=expires_in,
+        )
+
+    def complete_multipart_upload(self, object_key: str, upload_id: str, parts: list[dict[str, Any]]) -> None:
+        self.client.complete_multipart_upload(
+            Bucket=self.bucket_name,
+            Key=object_key,
+            UploadId=upload_id,
+            MultipartUpload={"Parts": parts},
+        )
+
+    def abort_multipart_upload(self, object_key: str, upload_id: str) -> None:
+        self.client.abort_multipart_upload(
+            Bucket=self.bucket_name,
+            Key=object_key,
+            UploadId=upload_id,
+        )
 
 
 def get_storage() -> StorageAdapter:

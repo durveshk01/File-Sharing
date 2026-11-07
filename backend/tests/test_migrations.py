@@ -23,7 +23,7 @@ def test_migration_on_clean_db():
         tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
         conn.close()
 
-        for expected in ("users", "files", "shares", "sessions", "activity", "one_time_tokens", "resumable_uploads"):
+        for expected in ("users", "files", "shares", "sessions", "activity", "one_time_tokens", "resumable_uploads", "devices"):
             assert expected in tables, f"Expected {expected} in {tables}"
     finally:
         gc.collect()

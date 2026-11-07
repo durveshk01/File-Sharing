@@ -20,10 +20,21 @@ services:
         fromDatabase:
           name: secureshare-db
           property: connectionString
+      # Storage configuration: 'local' for self-hosted fallback or 's3' for direct device-to-storage presigned transfers (AWS S3 / Cloudflare R2)
       - key: STORAGE_BACKEND
         value: local
       - key: STORAGE_PATH
         value: ./storage
+      - key: S3_BUCKET_NAME
+        sync: false
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: S3_REGION
+        value: auto
       - key: FRONTEND_ORIGIN
         value: https://frontend-five-fawn-27.vercel.app
       - key: COOKIE_SECURE

@@ -23,6 +23,7 @@ const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 export default function SecurityPage() {
   const [sessions, setSessions] = useState<any[]>([]);
+  const [devices, setDevices] = useState<any[]>([]);
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
   const [twoFactorEnabled, setTwoFactorEnabled] = useState(false);
@@ -50,6 +51,11 @@ export default function SecurityPage() {
     if (twoFaRes.ok) {
       const data = await twoFaRes.json();
       setTwoFactorEnabled(data.enabled);
+    }
+
+    const devRes = await fetch(`${API}/api/sync/devices`, { credentials: 'include' });
+    if (devRes.ok) {
+      setDevices(await devRes.json());
     }
   }
 
@@ -82,6 +88,17 @@ export default function SecurityPage() {
     if (!confirm('Revoke all other active sessions? You will need to log back in.')) return;
     await fetch(`${API}/api/auth/sessions`, { method: 'DELETE', credentials: 'include' });
     router.replace('/login');
+  }
+
+  async function revokeDevice(deviceId: string, deviceName: string) {
+    if (!confirm(`Revoke device "${deviceName}"? It will no longer be authorized to sync files.`)) return;
+    try {
+      await fetch(`${API}/api/sync/devices/${deviceId}`, { method: 'DELETE', credentials: 'include' });
+      setDevices((prev) => prev.filter((d) => d.id !== deviceId));
+      setMsg(`Device "${deviceName}" revoked successfully.`);
+    } catch {
+      setErr('Could not revoke device');
+    }
   }
 
   async function start2FASetup() {
@@ -351,6 +368,56 @@ export default function SecurityPage() {
                   Update Password
                 </button>
               </form>
+            </div>
+
+            {/* Registered Devices Panel */}
+            <div className="panel" style={{ marginBottom: 20 }}>
+              <div className="panel-title">
+                <h3>Registered Synchronization Devices ({devices.length})</h3>
+                <span className="badge badge-info">Delta Sync Enabled</span>
+              </div>
+              {devices.length === 0 ? (
+                <div style={{ color: '#64748b', fontSize: 12, padding: '12px 0' }}>
+                  No standalone mobile or desktop devices registered yet. Connect the SecureShare mobile app to sync offline.
+                </div>
+              ) : (
+                <div style={{ display: 'grid', gap: 8 }}>
+                  {devices.map((d) => (
+                    <div
+                      key={d.id}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        padding: '12px 14px',
+                        borderRadius: 8,
+                        background: '#f8fafc',
+                        border: '1px solid #e2e8f0',
+                        fontSize: 12,
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <div style={{ width: 32, height: 32, borderRadius: 8, background: '#eff6ff', color: '#2563eb', display: 'grid', placeItems: 'center' }}>
+                          <Smartphone size={16} />
+                        </div>
+                        <div>
+                          <strong style={{ color: '#0f172a' }}>{d.device_name}</strong>
+                          <div style={{ color: '#64748b', fontSize: 11, marginTop: 2 }}>
+                            Type: {d.device_type} • Last active: {new Date(d.last_seen_at).toLocaleString()}
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => revokeDevice(d.id, d.device_name)}
+                        className="btn-outline btn-sm"
+                        style={{ color: '#dc2626', borderColor: '#fca5a5' }}
+                      >
+                        Revoke Access
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Active Sessions Panel */}

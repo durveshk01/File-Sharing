@@ -1,0 +1,35 @@
+{
+  "name": "secureshare-mobile",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web",
+    "build:apk": "eas build --platform android --profile preview --local",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^1.2.1",
+    "expo": "~52.0.28",
+    "expo-battery": "~9.0.2",
+    "expo-crypto": "~14.0.2",
+    "expo-document-picker": "~13.0.2",
+    "expo-file-system": "~18.0.7",
+    "expo-local-authentication": "~15.0.2",
+    "expo-network": "~7.0.4",
+    "expo-secure-store": "~14.0.1",
+    "expo-sharing": "~13.0.1",
+    "expo-sqlite": "~15.0.6",
+    "expo-status-bar": "~2.0.1",
+    "react": "18.3.1",
+    "react-native": "0.76.7"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "@types/react": "~18.3.12",
+    "typescript": "^5.3.3"
+  },
+  "private": true
+}
