@@ -69,7 +69,8 @@ class LocalStorage(StorageAdapter):
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _resolve(self, key: str) -> Path:
-        target = (self.root / key).resolve()
+        normalized = key.replace("\\", "/")
+        target = (self.root / normalized).resolve()
         if not target.is_relative_to(self.root):
             raise ValueError(f"Path traversal detected: {key}")
         return target
