@@ -6,7 +6,13 @@ npm-debug.*
 yarn-debug.*
 yarn-error.*
 
-# Native artifacts
+# Native build artifacts
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/app/.cxx/
+ios/
 *.orig.*
 *.jks
 *.p8
