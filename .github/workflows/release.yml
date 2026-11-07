@@ -38,9 +38,9 @@ jobs:
         working-directory: mobile
         run: npm ci
 
-      - name: Prebuild Android Native Files
-        working-directory: mobile
-        run: npx expo prebuild --platform android --clean
+      - name: Make Gradle Wrapper Executable
+        working-directory: mobile/android
+        run: chmod +x gradlew
 
       - name: Build Release APK
         working-directory: mobile/android
@@ -57,8 +57,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'v1.0.0' }}
           files: mobile/android/app/build/outputs/apk/release/*.apk
           generate_release_notes: true
           draft: false
           prerelease: false
-          name: SecureShare Mobile ${{ github.ref_name || 'v1.0.0' }}
+          name: SecureShare Release ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'v1.0.0' }}
