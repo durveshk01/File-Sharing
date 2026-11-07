@@ -9,3 +9,4 @@ python-multipart==0.0.20
 email-validator==2.2.0
 alembic==1.14.1
 boto3>=1.34.0
+httpx>=0.28.0
