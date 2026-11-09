@@ -40,7 +40,7 @@ import {
   X,
   Zap
 } from 'lucide-react';
-import { apiRequest, API_URL, setAuthToken } from '../lib/api';
+import { apiRequest, clearBrowserSession } from '../lib/api';
 import { uploadDeviceEncryptedFile, getLocalFileKey, UploadProgress } from '../lib/uploader';
 import { downloadAndDecryptFile } from '../lib/downloader';
 
@@ -94,7 +94,7 @@ export default function Dashboard() {
 
   // Device-Powered Upload State
   const [uploadQueue, setUploadQueue] = useState<
-    { name: string; size: number; progress: UploadProgress }[]
+    { id: string; name: string; size: number; progress: UploadProgress }[]
   >([]);
   const [uploading, setUploading] = useState(false);
 
@@ -112,6 +112,7 @@ export default function Dashboard() {
   const [downloadStatus, setDownloadStatus] = useState('');
 
   async function loadDashboard() {
+    setError('');
     try {
       const [u, fList, act, sync] = await Promise.all([
         apiRequest('/api/auth/me'),
@@ -142,9 +143,11 @@ export default function Dashboard() {
     if (!fileList.length) return;
     setUploading(true);
     setError('');
+    const failures: string[] = [];
 
     for (const file of fileList) {
       const queueItem = {
+        id: crypto.randomUUID(),
         name: file.name,
         size: file.size,
         progress: {
@@ -162,16 +165,17 @@ export default function Dashboard() {
       try {
         await uploadDeviceEncryptedFile(file, (p) => {
           setUploadQueue((prev) =>
-            prev.map((item) => (item.name === file.name ? { ...item, progress: p } : item))
+            prev.map((item) => (item.id === queueItem.id ? { ...item, progress: p } : item))
           );
         });
       } catch (err: any) {
-        setError(`Upload failed for ${file.name}: ${err.message}`);
+        failures.push(`Upload failed for ${file.name}: ${err.message}`);
       }
     }
 
     setUploading(false);
     await loadDashboard();
+    if (failures.length) setError(failures.join(' '));
   }
 
   function handleDrag(e: DragEvent) {
@@ -198,6 +202,10 @@ export default function Dashboard() {
     setShareBusy(true);
     setError('');
     try {
+      const localKey = shareFile.encryption_version === 'v2' ? await getLocalFileKey(shareFile.id) : null;
+      if (shareFile.encryption_version === 'v2' && !localKey) {
+        throw new Error('Import this file’s decryption key in file details before creating a share link.');
+      }
       const payload: Record<string, any> = {};
       if (expiresHours !== 'unlimited') {
         payload.expires_in_hours = parseInt(expiresHours, 10);
@@ -217,9 +225,8 @@ export default function Dashboard() {
 
       let shareUrl = res.url;
       // Append zero-knowledge decryption key fragment if available on this device
-      const localKey = getLocalFileKey(shareFile.id);
       if (localKey) {
-        shareUrl += `#key=${localKey}`;
+        shareUrl += `#key=${encodeURIComponent(localKey)}`;
       }
 
       setGeneratedLink(shareUrl);
@@ -258,7 +265,7 @@ export default function Dashboard() {
     try {
       await apiRequest('/api/auth/logout', { method: 'POST' });
     } catch {}
-    setAuthToken(null);
+    clearBrowserSession();
     router.replace('/');
   }
 
@@ -398,8 +405,8 @@ export default function Dashboard() {
                 <span>ENCRYPTED OBJECTS</span>
                 <Files size={16} className="text-blue-400" />
               </div>
-              <div style={{ fontSize: 26, fontWeight: 800 }}>{files.length}</div>
-              <div style={{ fontSize: 11, color: '#34d399', marginTop: 4 }}>100% Client-side AES-256-GCM</div>
+              <div style={{ fontSize: 26, fontWeight: 800 }}>{syncStatus?.active_files_count ?? files.length}</div>
+              <div style={{ fontSize: 11, color: '#34d399', marginTop: 4 }}>v2 device encryption · v1 legacy support</div>
             </div>
 
             <div className="card">
@@ -408,7 +415,7 @@ export default function Dashboard() {
                 <Cloud size={16} className="text-emerald-400" />
               </div>
               <div style={{ fontSize: 26, fontWeight: 800 }}>{fmt(totalUsedBytes)}</div>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>Private S3 Presigned Vault</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>Active files, trash and pending reservations</div>
             </div>
 
             <div className="card">
@@ -416,8 +423,8 @@ export default function Dashboard() {
                 <span>SYNCED DEVICES</span>
                 <Smartphone size={16} className="text-amber-400" />
               </div>
-              <div style={{ fontSize: 26, fontWeight: 800 }}>{syncStatus?.registered_devices_count || 1}</div>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>Delta Sync Cursor Active</div>
+              <div style={{ fontSize: 26, fontWeight: 800 }}>{syncStatus?.registered_devices_count ?? '—'}</div>
+              <Link href="/security" style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>Manage registered devices</Link>
             </div>
 
             <div className="card">
@@ -425,8 +432,8 @@ export default function Dashboard() {
                 <span>SECURITY ARCHITECTURE</span>
                 <Zap size={16} className="text-indigo-400" />
               </div>
-              <div style={{ fontSize: 18, fontWeight: 700, marginTop: 4 }}>Zero-Knowledge</div>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>Render Coordinates Only</div>
+              <div style={{ fontSize: 18, fontWeight: 700, marginTop: 4 }}>Device-held v2 keys</div>
+              <Link href="/settings" style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>Back up your private file keys</Link>
             </div>
           </div>
 
@@ -445,7 +452,7 @@ export default function Dashboard() {
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 {uploadQueue.map((item, idx) => (
-                  <div key={idx} style={{ background: 'var(--surface-raised)', padding: '10px 14px', borderRadius: 8 }}>
+                  <div key={item.id} style={{ background: 'var(--surface-raised)', padding: '10px 14px', borderRadius: 8 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 6 }}>
                       <span style={{ fontWeight: 600 }}>{item.name}</span>
                       <span style={{ color: item.progress.percent === 100 ? '#34d399' : '#60a5fa' }}>
@@ -455,6 +462,7 @@ export default function Dashboard() {
                         {item.progress.phase === 'completed' && 'Completed & Synced'}
                       </span>
                     </div>
+                    {item.progress.error && <p role="alert" style={{ color: '#fda4af' }}>{item.progress.error}</p>}
                     <div className="progress-track" style={{ height: 4 }}>
                       <div className="progress-fill" style={{ width: `${item.progress.percent}%` }} />
                     </div>
@@ -494,7 +502,7 @@ export default function Dashboard() {
           </div>
 
           {/* Main Content Grid: Recent Files & Live Activity */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: 24 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 360px), 1fr))', gap: 24 }}>
             {/* Recent Files Table */}
             <div className="card" style={{ padding: 20 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>

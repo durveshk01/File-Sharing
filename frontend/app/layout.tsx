@@ -1,4 +1,5 @@
 import './globals.css';
+import WorkspaceNavigation from './components/workspace-navigation';
 
 export const metadata = {
   title: 'SecureShare — Secure File Sharing & Encrypted Document Transfer',
@@ -7,7 +8,7 @@ export const metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" data-scroll-behavior="smooth">
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
@@ -16,7 +17,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           rel="stylesheet"
         />
       </head>
-      <body>{children}</body>
+      <body><WorkspaceNavigation />{children}</body>
     </html>
   );
 }

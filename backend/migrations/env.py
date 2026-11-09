@@ -1,6 +1,6 @@
 from logging.config import fileConfig
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import Column, MetaData, String, Table, engine_from_config, inspect, pool, text
 from app.core.config import settings
 from app.database import Base
 from app import models
@@ -38,10 +38,19 @@ def run_migrations_online():
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
+        # Existing revision IDs exceed Alembic's default VARCHAR(32).
+        version = Table("alembic_version", MetaData(), Column("version_num", String(128), primary_key=True))
+        version.create(connection, checkfirst=True)
+        if connection.dialect.name == "postgresql":
+            column = inspect(connection).get_columns("alembic_version")[0]
+            if getattr(column["type"], "length", 0) < 128:
+                connection.execute(text("ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(128)"))
+        connection.commit()
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
             version_table="alembic_version",
+            render_as_batch=connection.dialect.name == "sqlite",
         )
         with context.begin_transaction():
             context.run_migrations()

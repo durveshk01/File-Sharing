@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
-from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import sessionmaker
 
 # Test storage directory
@@ -22,21 +21,17 @@ os.environ["STORAGE_PATH"] = str(test_storage_dir)
 os.environ["STORAGE_BACKEND"] = "local"
 os.environ["MAIL_MODE"] = "console"
 os.environ["RUN_MIGRATIONS_ON_START"] = "false"
+os.environ["MAINTENANCE_INTERVAL_SECONDS"] = "0"
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.database import Base, get_db
-from app.main import app as fastapi_app, sent_emails
+from app.main import app as fastapi_app, sent_emails, _attempts
 from app import models
 
-# In-memory test engine with StaticPool so all sessions share the DB in memory
-test_engine = create_engine(
-    "sqlite:///:memory:",
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool,
-)
-TestingSessionLocal = sessionmaker(bind=test_engine, autoflush=False, expire_on_commit=False)
+# Separate connections and enforced foreign keys exercise real transaction races.
+TestingSessionLocal = sessionmaker(autoflush=False, expire_on_commit=False)
 
 def override_get_db():
     db = TestingSessionLocal()
@@ -48,11 +43,15 @@ def override_get_db():
 fastapi_app.dependency_overrides[get_db] = override_get_db
 
 @pytest.fixture(autouse=True)
-def setup_database():
+def setup_database(tmp_path):
+    test_engine = create_engine(f"sqlite:///{(tmp_path / 'test.db').as_posix()}", connect_args={"check_same_thread": False})
+    TestingSessionLocal.configure(bind=test_engine)
     Base.metadata.create_all(bind=test_engine)
     sent_emails.clear()
+    _attempts.clear()
     yield
     Base.metadata.drop_all(bind=test_engine)
+    test_engine.dispose()
     if test_storage_dir.exists():
         shutil.rmtree(test_storage_dir, ignore_errors=True)
         test_storage_dir.mkdir(parents=True, exist_ok=True)

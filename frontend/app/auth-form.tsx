@@ -1,11 +1,14 @@
 'use client';
 
+import { API } from './api';
+import { setBrowserAccount } from './lib/api';
+
 import { FormEvent, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { LockKeyhole, ArrowRight, ShieldCheck, Mail, Sparkles, KeyRound } from 'lucide-react';
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
 
 export default function AuthForm({ mode }: { mode: 'login' | 'register' }) {
   const [error, setError] = useState('');
@@ -59,7 +62,7 @@ export default function AuthForm({ mode }: { mode: 'login' | 'register' }) {
         setChallengeToken(body.challenge_token);
         return;
       }
-
+      setBrowserAccount(body);
       router.push('/dashboard');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connection error');
@@ -86,6 +89,7 @@ export default function AuthForm({ mode }: { mode: 'login' | 'register' }) {
       if (!r.ok) {
         throw new Error(body.detail || 'Invalid authentication code');
       }
+      setBrowserAccount(body);
       router.push('/dashboard');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connection error');
@@ -100,6 +104,7 @@ export default function AuthForm({ mode }: { mode: 'login' | 'register' }) {
     try {
       const r = await fetch(`${API}/api/auth/demo`, { method: 'POST', credentials: 'include' });
       if (!r.ok) throw new Error('Demo access is currently unavailable');
+      setBrowserAccount(await r.json());
       router.push('/dashboard');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connection error');

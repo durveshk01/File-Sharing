@@ -1,5 +1,7 @@
 'use client';
 
+import { API } from '../api';
+
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -18,7 +20,7 @@ import {
   Bell
 } from 'lucide-react';
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
 
 type NotificationItem = {
   id: string;
@@ -30,18 +32,23 @@ type NotificationItem = {
 export default function NotificationsPage() {
   const [items, setItems] = useState<NotificationItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [savingId, setSavingId] = useState<string | null>(null);
+  const [savingAll, setSavingAll] = useState(false);
   const router = useRouter();
 
   async function load() {
+    setError('');
     try {
       const r = await fetch(`${API}/api/notifications`, { credentials: 'include' });
       if (r.status === 401) {
         router.replace('/login');
         return;
       }
-      if (r.ok) {
-        setItems(await r.json());
-      }
+      if (!r.ok) throw new Error('Could not load notifications. Try again.');
+      setItems(await r.json());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not load notifications. Try again.');
     } finally {
       setLoading(false);
     }
@@ -52,13 +59,31 @@ export default function NotificationsPage() {
   }, []);
 
   async function mark(id: string) {
-    await fetch(`${API}/api/notifications/${id}`, { method: 'PATCH', credentials: 'include' });
-    load();
+    setSavingId(id);
+    setError('');
+    try {
+      const response = await fetch(`${API}/api/notifications/${id}`, { method: 'PATCH', credentials: 'include' });
+      if (!response.ok) throw new Error('Could not update this notification. Try again.');
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not update this notification. Try again.');
+    } finally {
+      setSavingId(null);
+    }
   }
 
   async function markAllRead() {
-    await fetch(`${API}/api/notifications/mark-all-read`, { method: 'POST', credentials: 'include' });
-    load();
+    setSavingAll(true);
+    setError('');
+    try {
+      const response = await fetch(`${API}/api/notifications/mark-all-read`, { method: 'POST', credentials: 'include' });
+      if (!response.ok) throw new Error('Could not update notifications. Try again.');
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not update notifications. Try again.');
+    } finally {
+      setSavingAll(false);
+    }
   }
 
   async function logout() {
@@ -125,13 +150,14 @@ export default function NotificationsPage() {
               <p>In-app alerts for uploads, recipient downloads, password challenges, and expirations.</p>
             </div>
             {unreadCount > 0 && (
-              <button className="btn-outline" onClick={markAllRead}>
-                <CheckCheck size={15} /> Mark All as Read
+              <button className="btn-outline" onClick={markAllRead} disabled={savingAll}>
+                <CheckCheck size={15} /> {savingAll ? 'Updating…' : 'Mark All as Read'}
               </button>
             )}
           </div>
 
           <div className="panel" style={{ maxWidth: 800 }}>
+            {error && <p className="auth-error" role="alert">{error}</p>}
             {loading ? (
               <div className="empty">Loading notifications…</div>
             ) : items.length ? (
@@ -177,9 +203,10 @@ export default function NotificationsPage() {
                       <button
                         onClick={() => mark(n.id)}
                         className="btn-outline btn-sm"
+                        disabled={savingId === n.id || savingAll}
                         style={{ fontSize: 11, padding: '4px 10px' }}
                       >
-                        <Check size={12} /> Mark Read
+                        <Check size={12} /> {savingId === n.id ? 'Updating…' : 'Mark Read'}
                       </button>
                     )}
                   </div>

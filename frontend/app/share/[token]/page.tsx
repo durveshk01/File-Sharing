@@ -1,5 +1,7 @@
 'use client';
 
+import { API } from '../../api';
+
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
@@ -19,7 +21,7 @@ import {
 } from 'lucide-react';
 import { downloadAndDecryptSharedFile } from '../../lib/downloader';
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
 
 const fmt = (n: number) =>
   n < 1024
@@ -56,10 +58,8 @@ export default function SharedFile() {
   useEffect(() => {
     // Extract zero-knowledge key fragment from URL hash
     if (typeof window !== 'undefined' && window.location.hash) {
-      const match = window.location.hash.match(/#key=([^&]+)/);
-      if (match && match[1]) {
-        setKeyFromHash(match[1]);
-      }
+      const key = new URLSearchParams(window.location.hash.slice(1)).get('key');
+      if (key) setKeyFromHash(key.replace(/ /g, '+'));
     }
 
     fetch(`${API}/api/shares/${token}`)
@@ -101,29 +101,11 @@ export default function SharedFile() {
     setDownloadStatus('Authorizing secure transfer...');
 
     try {
-      if (keyFromHash) {
-        // Zero-Knowledge Client-Side Decryption
-        await downloadAndDecryptSharedFile(token, keyFromHash, grant, (pct, status) => {
-          setDownloadProgress(pct);
-          setDownloadStatus(status);
-        });
-      } else {
-        // Fallback for links or legacy files
-        const r = await fetch(`${API}/api/shares/${token}/download`, {
-          method: 'POST',
-          headers: grant ? { 'X-Share-Grant': grant } : {},
-        });
-        if (!r.ok) {
-          const body = await r.json();
-          throw new Error(body.detail || 'This share link is no longer available.');
-        }
-        const b = await r.blob();
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(b);
-        a.download = file?.name || 'download';
-        a.click();
-        URL.revokeObjectURL(a.href);
-      }
+      if (file?.encryption_version === 'v2' && !keyFromHash.trim()) throw new Error('Ask the sender for the complete link or paste the file decryption key below.');
+      await downloadAndDecryptSharedFile(token, file?.encryption_version === 'v2' ? keyFromHash : null, grant, (pct, status) => {
+        setDownloadProgress(pct);
+        setDownloadStatus(status);
+      });
 
       setDownloadComplete(true);
       setDownloadStatus('Decryption & Integrity Verified (SHA-256)');
@@ -166,7 +148,7 @@ export default function SharedFile() {
               <RefreshCw size={24} className="animate-spin" style={{ margin: '0 auto 12px' }} />
               <div>Verifying cryptographic share token...</div>
             </div>
-          ) : error ? (
+          ) : error && !file ? (
             <div style={{ textAlign: 'center', padding: '20px 0' }}>
               <div style={{ width: 44, height: 44, borderRadius: '50%', background: 'rgba(239, 68, 68, 0.1)', color: '#f87171', display: 'grid', placeItems: 'center', margin: '0 auto 16px' }}>
                 <AlertCircle size={24} />
@@ -179,6 +161,13 @@ export default function SharedFile() {
             </div>
           ) : file ? (
             <div>
+              {error && <div className="notice-error" role="alert">{error}</div>}
+              {file.encryption_version === 'v2' && !downloadComplete && (
+                <div className="field">
+                  <label htmlFor="share-key">File decryption key (from the sender’s full link)</label>
+                  <input id="share-key" type="password" autoComplete="off" value={keyFromHash} onChange={(e) => setKeyFromHash(e.target.value)} placeholder="Paste the Base64 file key if the link is incomplete" />
+                </div>
+              )}
               {/* File details */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 14, background: '#1f2937', padding: 18, borderRadius: 12, border: '1px solid #374151', marginBottom: 20 }}>
                 <div style={{ width: 42, height: 42, borderRadius: 10, background: '#111827', display: 'grid', placeItems: 'center', color: '#60a5fa' }}>
@@ -202,8 +191,8 @@ export default function SharedFile() {
                 </div>
                 {keyFromHash && (
                   <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', background: '#1f2937', padding: '8px 12px', borderRadius: 6 }}>
-                    <span>Decryption Mode</span>
-                    <span style={{ color: '#60a5fa', fontWeight: 600 }}>Zero-Knowledge (On Device)</span>
+                      <span>Decryption Mode</span>
+                      <span style={{ color: '#60a5fa', fontWeight: 600 }}>{file.encryption_version === 'v2' ? 'On this device' : 'Legacy server envelope'}</span>
                   </div>
                 )}
                 {file.max_downloads && (
@@ -222,7 +211,7 @@ export default function SharedFile() {
                   </div>
                   <input
                     type="password"
-                    placeholder="Enter decryption password..."
+                    placeholder="Enter the share access password..."
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     style={{ width: '100%', height: 42, background: '#1f2937', border: '1px solid #374151', borderRadius: 8, color: '#fff', padding: '0 12px', fontSize: 14 }}

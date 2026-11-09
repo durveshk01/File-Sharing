@@ -1,12 +1,15 @@
 'use client';
-import { useEffect, useState } from 'react';
+
+import { apiRequest } from '../lib/api';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
 
 export default function VerifyPage() {
   const router = useRouter();
   const [message, setMessage] = useState('Verifying your email…');
+  const verification = useRef<Promise<unknown> | null>(null);
 
   useEffect(() => {
     const token = new URLSearchParams(window.location.search).get('token');
@@ -14,21 +17,22 @@ export default function VerifyPage() {
       setMessage('Verification link is invalid.');
       return;
     }
-    fetch(`${API}/api/auth/verify-email`, {
+    // Reuse the in-flight request during Strict Mode effect replay: a one-time
+    // verification token must not be consumed by two requests from this page.
+    verification.current ??= apiRequest('/api/auth/verify-email', {
       method: 'POST',
-      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token }),
-    })
-      .then(async (r) => {
-        if (!r.ok) {
-          const err = await r.json().catch(() => ({}));
-          throw new Error(err.detail || 'This verification link is invalid or expired.');
-        }
+    });
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    verification.current.then(() => {
+        if (!active) return;
         setMessage('Email verified. Opening your workspace…');
-        setTimeout(() => router.replace('/dashboard'), 700);
+        timer = setTimeout(() => router.replace('/dashboard'), 700);
       })
-      .catch((e) => setMessage(e.message));
+      .catch((e) => { if (active) setMessage(e.message); });
+    return () => { active = false; if (timer) clearTimeout(timer); };
   }, [router]);
 
   return (

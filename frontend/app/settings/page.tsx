@@ -1,5 +1,9 @@
 'use client';
 
+import { API } from '../api';
+import { apiRequest, clearBrowserSession } from '../lib/api';
+import KeyBackupPanel from '../components/key-backup-panel';
+
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -20,7 +24,7 @@ import {
   CheckCircle2
 } from 'lucide-react';
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
 
 const fmt = (n: number) =>
   n < 1024
@@ -31,23 +35,19 @@ const fmt = (n: number) =>
 
 export default function SettingsPage() {
   const [user, setUser] = useState<{ id: string; name: string; email: string; verified?: boolean } | null>(null);
-  const [storageUsage, setStorageUsage] = useState<{ bytes: number; limit: number } | null>(null);
+  const [storageUsage, setStorageUsage] = useState<{ bytes: number; limit: number; active_bytes: number; trash_bytes: number; pending_bytes: number; max_file_bytes: number } | null>(null);
+  const [error, setError] = useState('');
   const router = useRouter();
 
   async function load() {
+    setError('');
     try {
-      const [uRes, sRes] = await Promise.all([
-        fetch(`${API}/api/auth/me`, { credentials: 'include' }),
-        fetch(`${API}/api/storage/usage`, { credentials: 'include' }),
+      const [user, usage] = await Promise.all([
+        apiRequest('/api/auth/me'), apiRequest('/api/storage/usage'),
       ]);
-      if (uRes.status === 401) {
-        router.replace('/login');
-        return;
-      }
-      if (uRes.ok) setUser(await uRes.json());
-      if (sRes.ok) setStorageUsage(await sRes.json());
-    } catch {
-      // Handled silently
+      setUser(user); setStorageUsage(usage);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Could not load account settings');
     }
   }
 
@@ -56,12 +56,12 @@ export default function SettingsPage() {
   }, []);
 
   async function logout() {
-    await fetch(`${API}/api/auth/logout`, { method: 'POST', credentials: 'include' });
-    router.replace('/');
+    try { await apiRequest('/api/auth/logout', { method: 'POST' }); clearBrowserSession(); router.replace('/'); }
+    catch (error) { setError(error instanceof Error ? error.message : 'Could not sign out'); }
   }
 
   const used = storageUsage?.bytes || 0;
-  const limit = storageUsage?.limit || 52428800; // 50MB
+  const limit = storageUsage?.limit || 1073741824;
   const percent = Math.min(100, Math.round((used / limit) * 100));
 
   return (
@@ -115,6 +115,7 @@ export default function SettingsPage() {
         </header>
 
         <div className="dash-content">
+          {error && <div className="notice-error" role="alert">{error}<button className="btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={load}>Retry</button></div>}
           <div className="dash-heading">
             <div>
               <h1>Settings & Preferences</h1>
@@ -138,7 +139,7 @@ export default function SettingsPage() {
                     <User size={20} />
                   </div>
                   <div>
-                    <strong style={{ fontSize: 16, color: '#0f172a' }}>{user?.name || 'Loading…'}</strong>
+                     <strong style={{ fontSize: 16, color: 'var(--text-primary)' }}>{user?.name || 'Loading…'}</strong>
                     <div style={{ color: '#64748b', fontSize: 12 }}>{user?.email}</div>
                   </div>
                 </div>
@@ -146,7 +147,7 @@ export default function SettingsPage() {
                 <div style={{ borderTop: '1px solid #f1f5f9', paddingTop: 14, marginTop: 4, display: 'grid', gap: 8 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', color: '#64748b' }}>
                     <span>Account Identifier:</span>
-                    <code style={{ color: '#0f172a', fontSize: 11 }}>{user?.id}</code>
+                    <code style={{ color: 'var(--text-primary)', fontSize: 11 }}>{user?.id}</code>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', color: '#64748b' }}>
                     <span>Password Hash:</span>
@@ -163,17 +164,19 @@ export default function SettingsPage() {
                 <HardDrive size={16} color="#2563eb" />
               </div>
 
-              <div style={{ fontSize: 13, color: '#475569' }}>
+              <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
                   <span>{fmt(used)} used of {fmt(limit)}</span>
                   <strong>{percent}%</strong>
                 </div>
-                <div className="progress-bar-wrap">
-                  <div className="progress-bar-fill" style={{ width: `${percent}%` }}></div>
+                <div className="progress-track">
+                  <div className="progress-fill" style={{ width: `${percent}%` }}></div>
                 </div>
                 <small style={{ color: '#94a3b8', fontSize: 11 }}>
-                  Files are compressed and encrypted with AES-256-GCM before writing to storage.
+                  Active files, trash and unfinished uploads count toward your quota. Maximum file size: {fmt(storageUsage?.max_file_bytes || 52428800)}.
                 </small>
+                {storageUsage && <p>Active: {fmt(storageUsage.active_bytes)} · Trash: {fmt(storageUsage.trash_bytes)} · Pending: {fmt(storageUsage.pending_bytes)}</p>}
+                <Link className="btn-secondary btn-sm" href="/files/manage">Manage trash & unfinished uploads</Link>
               </div>
             </div>
 
@@ -193,12 +196,12 @@ export default function SettingsPage() {
                     alignItems: 'center',
                     padding: '12px 14px',
                     borderRadius: 8,
-                    background: '#f8fafc',
-                    border: '1px solid #e2e8f0',
+                    background: 'var(--surface-raised)',
+                    border: '1px solid var(--border)',
                   }}
                 >
                   <div>
-                    <strong style={{ fontSize: 13, color: '#0f172a' }}>Two-Factor Authentication & Active Sessions</strong>
+                    <strong style={{ fontSize: 13, color: 'var(--text-primary)' }}>Two-Factor Authentication & Active Sessions</strong>
                     <p style={{ margin: '2px 0 0', fontSize: 11, color: '#64748b' }}>
                       Configure TOTP authenticator apps, view device sessions, and change passwords.
                     </p>
@@ -214,12 +217,12 @@ export default function SettingsPage() {
                     alignItems: 'center',
                     padding: '12px 14px',
                     borderRadius: 8,
-                    background: '#f8fafc',
-                    border: '1px solid #e2e8f0',
+                    background: 'var(--surface-raised)',
+                    border: '1px solid var(--border)',
                   }}
                 >
                   <div>
-                    <strong style={{ fontSize: 13, color: '#0f172a' }}>Audit & Telemetry Logs</strong>
+                    <strong style={{ fontSize: 13, color: 'var(--text-primary)' }}>Audit & Access Logs</strong>
                     <p style={{ margin: '2px 0 0', fontSize: 11, color: '#64748b' }}>
                       Review complete access logs for file uploads, downloads, and link events.
                     </p>
@@ -228,6 +231,7 @@ export default function SettingsPage() {
                 </Link>
               </div>
             </div>
+            <KeyBackupPanel />
           </div>
         </div>
       </main>

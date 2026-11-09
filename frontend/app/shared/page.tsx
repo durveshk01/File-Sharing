@@ -1,5 +1,8 @@
 'use client';
 
+import { API } from '../api';
+import { apiFetch, apiRequest, clearBrowserSession } from '../lib/api';
+
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -23,7 +26,7 @@ import {
   FileDown
 } from 'lucide-react';
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
 
 type ShareItem = {
   id: string;
@@ -57,8 +60,9 @@ export default function SharedPage() {
   const router = useRouter();
 
   async function load() {
+    setErr('');
     try {
-      const r = await fetch(`${API}/api/shares`, { credentials: 'include' });
+      const r = await apiFetch('/api/shares');
       if (r.status === 401) {
         router.replace('/login');
         return;
@@ -79,9 +83,8 @@ export default function SharedPage() {
 
   async function revoke(id: string) {
     if (!confirm('Revoke this share link immediately? Recipient access will be blocked.')) return;
-    const r = await fetch(`${API}/api/shares/${id}`, { method: 'DELETE', credentials: 'include' });
-    if (r.ok) load();
-    else setErr('Could not revoke link');
+    try { await apiRequest(`/api/shares/${id}`, { method: 'DELETE' }); await load(); }
+    catch (error) { setErr(error instanceof Error ? error.message : 'Could not revoke link'); }
   }
 
   async function openLogsModal(s: ShareItem) {
@@ -121,8 +124,8 @@ export default function SharedPage() {
   }
 
   async function logout() {
-    await fetch(`${API}/api/auth/logout`, { method: 'POST', credentials: 'include' });
-    router.replace('/');
+    try { await apiRequest('/api/auth/logout', { method: 'POST' }); clearBrowserSession(); router.replace('/'); }
+    catch (error) { setErr(error instanceof Error ? error.message : 'Could not sign out'); }
   }
 
   const filtered = items.filter((s) => {
@@ -201,7 +204,7 @@ export default function SharedPage() {
           {err && <div className="auth-error" style={{ marginBottom: 16 }}>{err}</div>}
 
           {/* Filter Bar */}
-          <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+          <div className="toolbar">
             {(['all', 'active', 'expired', 'revoked', 'password'] as const).map((f) => (
               <button
                 key={f}
@@ -211,8 +214,8 @@ export default function SharedPage() {
                   borderRadius: 6,
                   fontSize: 12,
                   border: '1px solid #cbd5e1',
-                  background: filter === f ? '#2563eb' : '#fff',
-                  color: filter === f ? '#fff' : '#475569',
+                  background: filter === f ? '#2563eb' : 'var(--surface-raised)',
+                  color: filter === f ? '#fff' : 'var(--text-secondary)',
                   fontWeight: 600,
                   cursor: 'pointer',
                   textTransform: 'capitalize',
@@ -223,7 +226,7 @@ export default function SharedPage() {
             ))}
           </div>
 
-          <div className="panel">
+          <div className="panel table-scroll">
             {filtered.length ? (
               <table className="files-table">
                 <thead>
@@ -246,7 +249,7 @@ export default function SharedPage() {
                       <tr key={s.id}>
                         <td className="file-cell">
                           <div>
-                            <span style={{ fontWeight: 600, color: '#0f172a' }}>{s.file_name}</span>
+                            <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{s.file_name}</span>
                             <small style={{ display: 'block', color: '#94a3b8', fontSize: 10 }}>ID: {s.id.slice(0, 8)}…</small>
                           </div>
                         </td>
@@ -258,7 +261,7 @@ export default function SharedPage() {
                         </td>
                         <td>
                           {s.expires_at ? (
-                            <span style={{ color: isExpired ? '#dc2626' : '#334155' }}>
+                            <span style={{ color: isExpired ? '#fda4af' : 'var(--text-secondary)' }}>
                               {new Date(s.expires_at).toLocaleString()}
                             </span>
                           ) : (

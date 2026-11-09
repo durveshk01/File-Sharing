@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     cookie_samesite: str = "lax"
     session_days: int = 7
     max_upload_bytes: int = 50 * 1024 * 1024  # 50 MB
+    account_quota_bytes: int = 1024 * 1024 * 1024  # Includes trash and pending uploads.
+    max_chunk_bytes: int = 5 * 1024 * 1024
+    storage_grant_seconds: int = 300
+    upload_intent_seconds: int = 900
+    transfer_timeout_seconds: int = 300
+    max_pending_uploads: int = 20
+    maintenance_interval_seconds: int = 300
     
     # Email / SMTP settings
     mail_mode: str = "console"  # "console" or "smtp"

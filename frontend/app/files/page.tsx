@@ -42,8 +42,8 @@ import {
   X,
   Zap
 } from 'lucide-react';
-import { apiRequest, API_URL, setAuthToken } from '../lib/api';
-import { uploadDeviceEncryptedFile, getLocalFileKey, UploadProgress } from '../lib/uploader';
+import { apiRequest, requireBrowserAccount } from '../lib/api';
+import { uploadDeviceEncryptedFile, getLocalFileKey, saveLocalFileKey, UploadProgress } from '../lib/uploader';
 import { downloadAndDecryptFile } from '../lib/downloader';
 
 type F = {
@@ -87,6 +87,8 @@ export default function FilesPage() {
   const router = useRouter();
   const [files, setFiles] = useState<F[]>([]);
   const [loading, setLoading] = useState(true);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState<'all' | 'documents' | 'images' | 'code' | 'archives'>('all');
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('list');
@@ -97,7 +99,7 @@ export default function FilesPage() {
   const [statusMessage, setStatusMessage] = useState('');
 
   // Upload Progress
-  const [uploadProgressList, setUploadProgressList] = useState<{ name: string; progress: UploadProgress }[]>([]);
+  const [uploadProgressList, setUploadProgressList] = useState<{ id: string; name: string; progress: UploadProgress }[]>([]);
   const [uploading, setUploading] = useState(false);
 
   // Modals & Drawers
@@ -118,9 +120,13 @@ export default function FilesPage() {
   const [inspectLoading, setInspectLoading] = useState(false);
 
   async function loadFiles() {
+    setLoading(true); setError('');
     try {
-      const data = await apiRequest('/api/files');
+      await requireBrowserAccount();
+      const data = await apiRequest('/api/files?limit=500');
       setFiles(data);
+      setHasMore(data.length === 500);
+      setSelectedIds(new Set());
     } catch (err: any) {
       if (err.message?.includes('401') || err.message?.includes('Authentication required')) {
         router.replace('/login');
@@ -136,14 +142,27 @@ export default function FilesPage() {
     loadFiles();
   }, []);
 
+  async function loadMoreFiles() {
+    setLoadingMore(true); setError('');
+    try {
+      const data: F[] = await apiRequest(`/api/files?limit=500&offset=${files.length}`);
+      setFiles((previous) => Array.from(new Map([...previous, ...data].map((file) => [file.id, file])).values()));
+      setHasMore(data.length === 500);
+    } catch (error) { setError(error instanceof Error ? error.message : 'Could not load more files'); }
+    finally { setLoadingMore(false); }
+  }
+
   async function handleFileUpload(fileList: File[]) {
     if (!fileList.length) return;
     setUploading(true);
     setError('');
+    const failures: string[] = [];
 
     for (const f of fileList) {
+      const id = crypto.randomUUID();
       setUploadProgressList((prev) => [
         {
+          id,
           name: f.name,
           progress: {
             phase: 'reading',
@@ -160,16 +179,17 @@ export default function FilesPage() {
       try {
         await uploadDeviceEncryptedFile(f, (progress) => {
           setUploadProgressList((prev) =>
-            prev.map((item) => (item.name === f.name ? { ...item, progress } : item))
+            prev.map((item) => (item.id === id ? { ...item, progress } : item))
           );
         });
       } catch (err: any) {
-        setError(`Upload failed for ${f.name}: ${err.message}`);
+        failures.push(`Upload failed for ${f.name}: ${err.message}`);
       }
     }
 
     setUploading(false);
     await loadFiles();
+    if (failures.length) setError(failures.join(' '));
   }
 
   async function handleDownload(f: F) {
@@ -239,8 +259,11 @@ export default function FilesPage() {
 
   async function handleCopy(f: F) {
     try {
-      setStatusMessage(`Cloning encrypted metadata for "${f.name}"...`);
-      await apiRequest(`/api/files/${f.id}/copy`, { method: 'POST' });
+      setStatusMessage(`Copying encrypted file "${f.name}"...`);
+      const key = f.encryption_version === 'v2' ? await getLocalFileKey(f.id) : null;
+      if (f.encryption_version === 'v2' && !key) throw new Error('Import the decryption key in file details before copying this file.');
+      const copy = await apiRequest(`/api/files/${f.id}/copy`, { method: 'POST' });
+      if (key) await saveLocalFileKey(copy.id, key);
       await loadFiles();
       setTimeout(() => setStatusMessage(''), 2000);
     } catch (err: any) {
@@ -265,6 +288,10 @@ export default function FilesPage() {
     if (!shareFile) return;
     setShareBusy(true);
     try {
+      const localKey = shareFile.encryption_version === 'v2' ? await getLocalFileKey(shareFile.id) : null;
+      if (shareFile.encryption_version === 'v2' && !localKey) {
+        throw new Error('Import this file’s decryption key in file details before creating a share link.');
+      }
       const payload: Record<string, any> = {};
       if (shareExpiresHours !== 'unlimited') {
         payload.expires_in_hours = parseInt(shareExpiresHours, 10);
@@ -283,9 +310,8 @@ export default function FilesPage() {
       });
 
       let shareUrl = res.url;
-      const localKey = getLocalFileKey(shareFile.id);
       if (localKey) {
-        shareUrl += `#key=${localKey}`;
+        shareUrl += `#key=${encodeURIComponent(localKey)}`;
       }
       setGeneratedShareLink(shareUrl);
       await loadFiles();
@@ -414,6 +440,7 @@ export default function FilesPage() {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Link className="btn-secondary btn-sm" href="/files/manage">Trash & shared files</Link>
             {/* View Mode Toggle */}
             <div style={{ display: 'flex', background: 'var(--surface-raised)', borderRadius: 6, padding: 3, border: '1px solid var(--border)' }}>
               <button
@@ -459,7 +486,7 @@ export default function FilesPage() {
 
         {/* Filter and Search Bar */}
         <div style={{ padding: '16px 32px 0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
-          <div style={{ position: 'relative', width: 320 }}>
+          <div style={{ position: 'relative', width: 'min(100%, 320px)' }}>
             <Search size={15} style={{ position: 'absolute', left: 12, top: 11, color: 'var(--text-muted)' }} />
             <input
               type="text"
@@ -523,7 +550,7 @@ export default function FilesPage() {
         <div className="dash-content" style={{ paddingTop: 20 }}>
           {error && (
             <div style={{ background: 'rgba(239, 68, 68, 0.15)', border: '1px solid #ef4444', borderRadius: 8, padding: '12px 16px', color: '#f87171', fontSize: 13, marginBottom: 20 }}>
-              {error}
+              {error}<button className="btn-secondary btn-sm" style={{ marginLeft: 12 }} onClick={loadFiles}>Retry</button>
             </div>
           )}
 
@@ -545,11 +572,12 @@ export default function FilesPage() {
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {uploadProgressList.map((item, idx) => (
-                  <div key={idx} style={{ background: 'var(--surface-raised)', padding: 10, borderRadius: 6, fontSize: 12 }}>
+                  <div key={item.id} style={{ background: 'var(--surface-raised)', padding: 10, borderRadius: 6, fontSize: 12 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
                       <span style={{ fontWeight: 600 }}>{item.name}</span>
                       <span style={{ color: '#60a5fa' }}>{item.progress.phase} ({item.progress.percent}%)</span>
                     </div>
+                    {item.progress.error && <p role="alert" style={{ color: '#fda4af' }}>{item.progress.error}</p>}
                     <div className="progress-track" style={{ height: 3 }}>
                       <div className="progress-fill" style={{ width: `${item.progress.percent}%` }} />
                     </div>
@@ -560,7 +588,8 @@ export default function FilesPage() {
           )}
 
           {/* View Mode Rendering: List or Grid */}
-          {filtered.length === 0 ? (
+          {hasMore && <button className="btn-secondary" style={{ marginBottom: 16 }} disabled={loading || loadingMore} onClick={loadMoreFiles}>{loadingMore ? 'Loading…' : 'Load more files'}</button>}
+          {loading ? <div className="empty" role="status">Loading files…</div> : filtered.length === 0 ? (
             <div className="card" style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-muted)' }}>
               <FolderOpen size={40} style={{ margin: '0 auto 12px', opacity: 0.5 }} />
               <h3 style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)', marginBottom: 4 }}>No files found</h3>
@@ -574,7 +603,7 @@ export default function FilesPage() {
             </div>
           ) : viewMode === 'list' ? (
             /* LIST VIEW */
-            <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+            <div className="card table-scroll" style={{ padding: 0 }}>
               <table className="file-table">
                 <thead>
                   <tr>
@@ -608,7 +637,7 @@ export default function FilesPage() {
                             {getFileIcon(f.name)}
                           </div>
                           <div>
-                            <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{f.name}</div>
+                            <Link href={`/files/${f.id}`} style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{f.name}</Link>
                             {f.sha256_checksum && (
                               <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'DM Mono, monospace' }}>
                                 SHA: {f.sha256_checksum.substring(0, 16)}...
@@ -771,7 +800,7 @@ export default function FilesPage() {
       {/* Share Modal Dialog */}
       {shareFile && (
         <div className="modal-overlay" onClick={() => setShareFile(null)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+          <div className="modal-content" role="dialog" aria-modal="true" aria-label="Create a file sharing link" onClick={(e) => e.stopPropagation()}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <Share2 size={18} className="text-blue-400" />
@@ -785,10 +814,11 @@ export default function FilesPage() {
             {!generatedShareLink ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
                 <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
+                  <label htmlFor="share-expiry" style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
                     Expiration Hours
                   </label>
                   <select
+                    id="share-expiry"
                     value={shareExpiresHours}
                     onChange={(e) => setShareExpiresHours(e.target.value)}
                     style={{ width: '100%', height: 38, background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-primary)', padding: '0 10px', fontSize: 13 }}
@@ -803,9 +833,10 @@ export default function FilesPage() {
 
                 <div>
                   <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
-                    Maximum Allowed Downloads
+                    <span>Maximum Allowed Downloads</span>
                   </label>
                   <select
+                    aria-label="Maximum Allowed Downloads"
                     value={shareMaxDownloads}
                     onChange={(e) => setShareMaxDownloads(e.target.value)}
                     style={{ width: '100%', height: 38, background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-primary)', padding: '0 10px', fontSize: 13 }}
@@ -823,6 +854,7 @@ export default function FilesPage() {
                     Argon2id Password Protection (Optional)
                   </label>
                   <input
+                    aria-label="Share access password"
                     type="password"
                     placeholder="Leave empty for unpassworded link"
                     value={sharePassword}
@@ -856,6 +888,7 @@ export default function FilesPage() {
                   </label>
                   <div style={{ display: 'flex', gap: 8 }}>
                     <input
+                      aria-label="Generated share URL"
                       type="text"
                       readOnly
                       value={generatedShareLink}
@@ -943,11 +976,12 @@ export default function FilesPage() {
               </div>
               <div>
                 <span style={{ color: 'var(--text-muted)' }}>Tamper Check: </span>
-                <span style={{ color: '#34d399' }}>128-bit GCM Authentication Tag Verified</span>
+                <span style={{ color: 'var(--text-secondary)' }}>Checked during decryption; metadata alone is not verification</span>
               </div>
             </div>
 
             <div style={{ marginTop: 20, display: 'flex', justifyContent: 'flex-end' }}>
+              <Link href={`/files/${inspectFile.id}`} className="btn-primary btn-sm" style={{ marginRight: 10 }}>Open file details & verify</Link>
               <button onClick={() => setInspectFile(null)} className="btn-secondary btn-sm">Close</button>
             </div>
           </div>

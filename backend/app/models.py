@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
-import json
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, JSON, LargeBinary, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -14,11 +14,14 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(512))
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    totp_secret: Mapped[str | None] = mapped_column(Text, nullable=True)
     totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     recovery_codes_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-    files: Mapped[list["FileRecord"]] = relationship(back_populates="owner")
+    storage_reserved_bytes: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    sync_sequence: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    demo_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    files: Mapped[list["FileRecord"]] = relationship(back_populates="owner", passive_deletes=True)
     devices: Mapped[list["DeviceRecord"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 class SessionRecord(Base):
@@ -26,6 +29,7 @@ class SessionRecord(Base):
     token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    device_id: Mapped[str | None] = mapped_column(ForeignKey("devices.id", ondelete="SET NULL"), nullable=True, index=True)
 
 class DeviceRecord(Base):
     __tablename__ = "devices"
@@ -42,6 +46,7 @@ class DeviceRecord(Base):
 
 class FileRecord(Base):
     __tablename__ = "files"
+    __table_args__ = (Index("ix_files_owner_state_created", "owner_id", "upload_status", "is_deleted", "created_at"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(255))
@@ -58,6 +63,11 @@ class FileRecord(Base):
     client_modified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    upload_status: Mapped[str] = mapped_column(String(16), default="ready", server_default="ready")
+    ciphertext_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    upload_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    transfer_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     owner: Mapped[User] = relationship(back_populates="files")
 
 class ShareLink(Base):
@@ -105,6 +115,7 @@ class OneTimeToken(Base):
 
 class ResumableUpload(Base):
     __tablename__ = "resumable_uploads"
+    __table_args__ = (Index("ix_resumable_user_state", "user_id", "state"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(255))
@@ -114,6 +125,47 @@ class ResumableUpload(Base):
     completed_chunks: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    state: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending")
+    received_bytes: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    transfer_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class UploadChunk(Base):
+    __tablename__ = "upload_chunks"
+    upload_id: Mapped[str] = mapped_column(ForeignKey("resumable_uploads.id", ondelete="CASCADE"), primary_key=True)
+    chunk_index: Mapped[int] = mapped_column(Integer, primary_key=True)
+    size: Mapped[int] = mapped_column(Integer)
+    nonce: Mapped[bytes] = mapped_column(LargeBinary)
+    wrapped_key: Mapped[bytes] = mapped_column(LargeBinary)
+
+
+class FileChange(Base):
+    """Per-account, commit-ordered change journal, including deletion tombstones."""
+    __tablename__ = "file_changes"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    sequence: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSON().with_variant(JSONB(), "postgresql"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+
+
+class StorageGrant(Base):
+    """Scoped, short-lived ciphertext authorization; a shared transfer is counted once."""
+    __tablename__ = "storage_grants"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    file_id: Mapped[str] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"), index=True)
+    session_hash: Mapped[str | None] = mapped_column(ForeignKey("sessions.token_hash", ondelete="CASCADE"), nullable=True, index=True)
+    share_id: Mapped[str | None] = mapped_column(ForeignKey("shares.id", ondelete="CASCADE"), nullable=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    consumed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+
+
+class StorageCleanup(Base):
+    """Transactional outbox for object deletions, retried by maintenance."""
+    __tablename__ = "storage_cleanup"
+    object_key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    not_before: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
 
 class FilePermission(Base):
     __tablename__ = "file_permissions"
@@ -128,9 +180,12 @@ class FilePermission(Base):
 class FileAccessLog(Base):
     __tablename__ = "file_access_logs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    file_id: Mapped[str | None] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"), nullable=True, index=True)
-    share_id: Mapped[str | None] = mapped_column(ForeignKey("shares.id", ondelete="CASCADE"), nullable=True, index=True)
-    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    file_id: Mapped[str | None] = mapped_column(ForeignKey("files.id", ondelete="SET NULL"), nullable=True, index=True)
+    share_id: Mapped[str | None] = mapped_column(ForeignKey("shares.id", ondelete="SET NULL"), nullable=True, index=True)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    owner_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    subject_file_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    subject_share_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
     action: Mapped[str] = mapped_column(String(50))

@@ -1,5 +1,7 @@
 'use client';
 
+import { API } from '../api';
+
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -21,7 +23,7 @@ import {
   AlertTriangle
 } from 'lucide-react';
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
 
 type LogEntry = {
   id: string;
@@ -182,13 +184,13 @@ export default function AccessLogsPage() {
 
             <div className="stat">
               <div className="stat-head">
-                Audit Integrity
+                Audit Visibility
                 <span className="stat-icon" style={{ color: '#10b981', background: '#d1fae5' }}>
                   <ShieldCheck size={15} />
                 </span>
               </div>
-              <strong style={{ color: '#10b981' }}>Active</strong>
-              <small>SHA-256 verified</small>
+              <strong style={{ color: '#34d399' }}>Scoped</strong>
+              <small>Owner-authorized access history</small>
             </div>
           </div>
 
@@ -210,8 +212,8 @@ export default function AccessLogsPage() {
                     borderRadius: 6,
                     fontSize: 12,
                     border: '1px solid #cbd5e1',
-                    background: filterAction === opt.value ? '#2563eb' : '#fff',
-                    color: filterAction === opt.value ? '#fff' : '#475569',
+                    background: filterAction === opt.value ? '#2563eb' : 'var(--surface-raised)',
+                    color: filterAction === opt.value ? '#fff' : 'var(--text-secondary)',
                     fontWeight: 600,
                     cursor: 'pointer',
                   }}
@@ -235,14 +237,14 @@ export default function AccessLogsPage() {
                   borderRadius: 6,
                   border: '1px solid #cbd5e1',
                   outline: 'none',
-                  background: '#fff',
+                  background: 'var(--surface-raised)',
                 }}
               />
             </div>
           </div>
 
           {/* Logs Table */}
-          <div className="panel">
+          <div className="panel table-scroll">
             {loading ? (
               <div className="empty">Loading access logs…</div>
             ) : filteredLogs.length ? (
@@ -259,7 +261,7 @@ export default function AccessLogsPage() {
                 <tbody>
                   {filteredLogs.map((l) => (
                     <tr key={l.id}>
-                      <td style={{ fontWeight: 600, color: '#0f172a' }}>
+                      <td style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
                         <div>
                           <span>{l.action}</span>
                           {l.failure_reason && (

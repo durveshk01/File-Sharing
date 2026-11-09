@@ -2,7 +2,7 @@
  * SecureShare Device-Powered Cryptography (Web Crypto API)
  *
  * Implements client-side AES-256-GCM authenticated encryption and SHA-256 integrity verification.
- * Decryption keys and plaintext file contents NEVER touch the server.
+ * New v2 keys and plaintext file contents never touch the server.
  */
 
 const AAD = new TextEncoder().encode("secureshare:file:v2");
@@ -64,16 +64,21 @@ export async function decryptFileBuffer(
     ? new TextEncoder().encode("secureshare:file:v1")
     : AAD;
 
-  return await window.crypto.subtle.decrypt(
-    {
-      name: "AES-GCM",
-      iv: nonce as BufferSource,
-      additionalData: aad,
-      tagLength: 128,
-    },
-    key,
-    ciphertext
-  );
+  try {
+    return await window.crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: nonce as BufferSource,
+        additionalData: aad,
+        tagLength: 128,
+      },
+      key,
+      ciphertext
+    );
+  } catch {
+    // Web Crypto may reject with an OperationError whose message is empty.
+    throw new Error("Decryption could not authenticate the file. The private key is incorrect or the encrypted file was changed.");
+  }
 }
 
 export async function importDEK(base64Key: string): Promise<CryptoKey> {

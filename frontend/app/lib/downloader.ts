@@ -1,124 +1,87 @@
-import { apiRequest, API_URL } from "./api";
-import {
-  decryptFileBuffer,
-  base64ToArrayBuffer,
-  computeSHA256,
-} from "./crypto";
-import { getLocalFileKey } from "./uploader";
+import { apiFetch, apiRequest, requireBrowserAccount, responseError } from "./api";
+import { decryptFileBuffer, base64ToArrayBuffer, computeSHA256 } from "./crypto";
+import { getLocalFileKey, validateFileKey } from "./keyVault";
 
-export async function downloadAndDecryptFile(
-  fileId: string,
-  onProgress?: (percent: number, status: string) => void
-): Promise<void> {
-  onProgress?.(10, "Requesting download authorization...");
-  const intent = await apiRequest(`/api/files/${fileId}/download-intent`);
+export type DownloadIntent = {
+  name: string;
+  size: number;
+  content_type: string;
+  encryption_version: string;
+  nonce_b64: string;
+  sha256_checksum?: string;
+  ciphertext_sha256?: string;
+  download_url: string;
+  download_method: string;
+  download_headers: Record<string, string>;
+  mode: string;
+};
+type Progress = (percent: number, status: string) => void;
 
-  let downloadUrl = intent.download_url;
-  if (!downloadUrl.startsWith("http")) {
-    downloadUrl = `${API_URL}${downloadUrl}`;
-  }
-
-  onProgress?.(30, "Downloading encrypted ciphertext...");
-  const resp = await fetch(downloadUrl, { credentials: "include" });
-  if (!resp.ok) {
-    throw new Error(`Failed to download file from storage (status ${resp.status})`);
-  }
-  const ciphertextBuffer = await resp.arrayBuffer();
-
-  onProgress?.(70, "Decrypting on device with AES-256-GCM...");
-  let plainBuffer: ArrayBuffer;
-
+async function readIntent(intent: DownloadIntent, key: string | null, progress?: Progress): Promise<ArrayBuffer> {
   if (intent.encryption_version === "v2") {
-    const keyBase64 = getLocalFileKey(fileId);
-    if (!keyBase64) {
-      throw new Error(
-        "Decryption key not found on this device. Please import the file key to decrypt."
-      );
-    }
-    const nonce = new Uint8Array(base64ToArrayBuffer(intent.nonce_b64));
-    plainBuffer = await decryptFileBuffer(ciphertextBuffer, keyBase64, nonce, "v2");
+    if (!key) throw new Error("This device has no decryption key. Open file details to import the key from another device or a backup.");
+    key = validateFileKey(key);
+  }
+  progress?.(30, intent.encryption_version === "v2" ? "Downloading authorized ciphertext…" : "Downloading a server-decrypted legacy file…");
+  const options: RequestInit = { method: intent.download_method || "GET", headers: intent.download_headers || {} };
+  let response: Response;
+  if (intent.download_url.startsWith("/api/")) {
+    response = await apiFetch(intent.download_url, options);
+  } else if (intent.mode === "direct_s3" && new URL(intent.download_url).protocol === "https:") {
+    response = await fetch(intent.download_url, { method: options.method, credentials: "omit" });
   } else {
-    // Fallback for legacy v1 files
-    const legacyResp = await fetch(`${API_URL}/api/files/${fileId}/download`, {
-      credentials: "include",
-    });
-    if (!legacyResp.ok) throw new Error("Legacy download failed");
-    plainBuffer = await legacyResp.arrayBuffer();
+    throw new Error("Storage returned an unsupported download authorization");
   }
-
-  // Integrity validation
-  onProgress?.(90, "Verifying SHA-256 cryptographic checksum...");
-  if (intent.sha256_checksum) {
-    const calculatedSum = await computeSHA256(plainBuffer);
-    if (calculatedSum !== intent.sha256_checksum) {
-      throw new Error(
-        "CRITICAL SECURITY ALERT: SHA-256 checksum mismatch! The file has been tampered with or corrupted."
-      );
+  if (!response.ok) throw await responseError(response);
+  const bytes = await response.arrayBuffer();
+  const expectedSize = intent.size + (intent.encryption_version === "v2" ? 16 : 0);
+  if (bytes.byteLength !== expectedSize) throw new Error("Downloaded size does not match the file metadata");
+  let plaintext = bytes;
+  if (intent.encryption_version === "v2") {
+    if (intent.ciphertext_sha256 && await computeSHA256(bytes) !== intent.ciphertext_sha256) {
+      throw new Error("Ciphertext checksum does not match. The file was not saved.");
     }
+    progress?.(70, "Decrypting and authenticating on this device…");
+    plaintext = await decryptFileBuffer(bytes, key!, new Uint8Array(base64ToArrayBuffer(intent.nonce_b64)), "v2");
   }
-
-  onProgress?.(100, "Download ready!");
-  triggerBlobDownload(plainBuffer, intent.name, intent.content_type);
+  progress?.(90, "Verifying the original-byte SHA-256 checksum…");
+  if (intent.sha256_checksum && await computeSHA256(plaintext) !== intent.sha256_checksum) {
+    throw new Error("Plaintext checksum does not match. The file was not saved.");
+  }
+  progress?.(100, "Decryption and integrity checks passed");
+  return plaintext;
 }
 
-export async function downloadAndDecryptSharedFile(
-  token: string,
-  keyBase64: string,
-  grantToken?: string,
-  onProgress?: (percent: number, status: string) => void
-): Promise<void> {
-  onProgress?.(10, "Authorizing zero-knowledge download...");
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (grantToken) {
-    headers["X-Share-Grant"] = grantToken;
-  }
+export async function readDecryptedFile(fileId: string, progress?: Progress, importedKey?: string) {
+  await requireBrowserAccount();
+  const intent = await apiRequest<DownloadIntent>(`/api/files/${fileId}/download-intent`);
+  const key = intent.encryption_version === "v2" ? importedKey || await getLocalFileKey(fileId) : null;
+  return { intent, plaintext: await readIntent(intent, key, progress) };
+}
 
-  const intent = await apiRequest(`/api/shares/${token}/download-intent`, {
-    method: "POST",
-    headers,
+export async function downloadAndDecryptFile(fileId: string, progress?: Progress): Promise<void> {
+  progress?.(10, "Requesting download authorization…");
+  const { intent, plaintext } = await readDecryptedFile(fileId, progress);
+  triggerBlobDownload(plaintext, intent.name, intent.content_type);
+}
+
+export async function downloadAndDecryptSharedFile(token: string, keyBase64: string | null, grantToken?: string, progress?: Progress): Promise<void> {
+  if (keyBase64) keyBase64 = validateFileKey(keyBase64);
+  progress?.(10, "Authorizing this shared transfer…");
+  const intent = await apiRequest<DownloadIntent>(`/api/shares/${token}/download-intent`, {
+    method: "POST", headers: grantToken ? { "X-Share-Grant": grantToken } : {},
   });
-
-  let downloadUrl = intent.download_url;
-  if (!downloadUrl.startsWith("http")) {
-    downloadUrl = `${API_URL}${downloadUrl}`;
-  }
-
-  onProgress?.(35, "Transferring encrypted ciphertext from cloud...");
-  const resp = await fetch(downloadUrl);
-  if (!resp.ok) {
-    throw new Error(`Failed to retrieve encrypted object (status ${resp.status})`);
-  }
-  const ciphertextBuffer = await resp.arrayBuffer();
-
-  onProgress?.(75, "Locally decrypting with AES-256-GCM...");
-  const nonce = new Uint8Array(base64ToArrayBuffer(intent.nonce_b64));
-  const plainBuffer = await decryptFileBuffer(
-    ciphertextBuffer,
-    keyBase64,
-    nonce,
-    intent.encryption_version || "v2"
-  );
-
-  onProgress?.(92, "Validating file integrity...");
-  if (intent.sha256_checksum) {
-    const calculatedSum = await computeSHA256(plainBuffer);
-    if (calculatedSum !== intent.sha256_checksum) {
-      throw new Error("Integrity check failed: plaintext does not match SHA-256 checksum");
-    }
-  }
-
-  onProgress?.(100, "File decrypted successfully!");
-  triggerBlobDownload(plainBuffer, intent.name, intent.content_type);
+  const plaintext = await readIntent(intent, keyBase64, progress);
+  triggerBlobDownload(plaintext, intent.name, intent.content_type);
 }
 
-function triggerBlobDownload(buffer: ArrayBuffer, filename: string, mimeType: string = "application/octet-stream") {
-  const blob = new Blob([buffer], { type: mimeType });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename || "downloaded_file";
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+export function triggerBlobDownload(buffer: ArrayBuffer, filename: string, mimeType = "application/octet-stream") {
+  const url = URL.createObjectURL(new Blob([buffer], { type: mimeType }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename || "downloaded_file";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

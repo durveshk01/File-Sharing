@@ -42,9 +42,9 @@ def test_device_registration_and_listing(client: TestClient):
     del_resp = client.delete(f"/api/sync/devices/{device_id}", headers={"Authorization": f"Bearer {auth['token']}"})
     assert del_resp.status_code == 204
 
-    # Verify not in active list
+    # Revocation also invalidates this device's bound Bearer session.
     list_resp2 = client.get("/api/sync/devices", headers={"Authorization": f"Bearer {auth['token']}"})
-    assert not any(d["id"] == device_id for d in list_resp2.json())
+    assert list_resp2.status_code == 401
 
 
 def test_device_powered_e2e_encryption_and_transfer(client: TestClient):
@@ -155,6 +155,8 @@ def test_trash_and_restore_workflow(client: TestClient):
     # Upload via upload-intent
     plain = b"File to be trashed"
     nonce = secrets.token_bytes(12)
+    ciphertext = AESGCM(secrets.token_bytes(32)).encrypt(nonce, plain, b"secureshare:file:v2")
+    ciphertext_hash = hashlib.sha256(ciphertext).hexdigest()
     intent = client.post(
         "/api/storage/upload-intent",
         headers=headers,
@@ -162,13 +164,15 @@ def test_trash_and_restore_workflow(client: TestClient):
             "name": "trash_me.txt",
             "size": len(plain),
             "ciphertext_size": len(plain) + 16,
+            "sha256_checksum": hashlib.sha256(plain).hexdigest(),
+            "ciphertext_sha256": ciphertext_hash,
             "nonce_b64": base64.b64encode(nonce).decode(),
             "encryption_version": "v2",
         },
     ).json()
     fid = intent["file_id"]
-    client.put(intent["upload_url"], content=b"fake-cipher-data", headers=headers)
-    client.post(f"/api/files/{fid}/confirm-upload", headers=headers, json={})
+    assert client.put(intent["upload_url"], content=ciphertext, headers=headers).status_code == 200
+    assert client.post(f"/api/files/{fid}/confirm-upload", headers=headers, json={}).status_code == 200
 
     # Verify in active files
     files = client.get("/api/files", headers=headers).json()

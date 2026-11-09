@@ -1,5 +1,7 @@
 'use client';
 
+import { API, API_DOCS } from './api';
+
 import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -24,12 +26,13 @@ import {
   Activity,
   Cpu,
   DownloadCloud,
-  FolderLock
+  FolderLock,
+  Menu
 } from 'lucide-react';
 import { computeSHA256, generateDEK, generateNonce, encryptFileBuffer } from './lib/crypto';
-import { setAuthToken } from './lib/api';
+import { setBrowserAccount } from './lib/api';
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
 
 export default function LandingPage() {
   const router = useRouter();
@@ -101,9 +104,7 @@ export default function LandingPage() {
         throw new Error('Demo login service unavailable. Please check the backend connection.');
       }
       const data = await res.json();
-      if (data.token) {
-        setAuthToken(data.token);
-      }
+      setBrowserAccount(data);
       router.push('/dashboard');
     } catch (err) {
       setDemoError(err instanceof Error ? err.message : 'Demo login failed');
@@ -114,7 +115,7 @@ export default function LandingPage() {
   const faqs = [
     {
       q: 'Why is all file processing performed on the user device instead of Render?',
-      a: 'Zero-knowledge security and performance. When encryption, hashing, and decryption happen on your mobile device or browser, plaintext files and encryption keys NEVER reach the server. The Render backend acts strictly as a lightweight coordinator for authentication, metadata, and cloud sync.'
+      a: 'New v2 uploads are encrypted and hashed in your browser or mobile device. Their keys stay on your device while the API coordinates authentication, metadata, and authorized ciphertext transfer. Older v1 files use server-side envelope decryption for compatibility.'
     },
     {
       q: 'How does cross-device sharing work without the server knowing the keys?',
@@ -126,7 +127,7 @@ export default function LandingPage() {
     },
     {
       q: 'Where are encrypted files stored in production?',
-      a: 'SecureShare supports S3-compatible private object storage (AWS S3, Cloudflare R2, or MinIO). The client transfers ciphertext directly to object storage via short-lived presigned URLs, bypassing application server bottlenecks entirely.'
+      a: 'SecureShare supports private S3-compatible storage (AWS S3, Cloudflare R2, or MinIO). Configured S3 uploads use short-lived signed PUTs. Downloads use scoped API streams so password protection, revocation, and download limits remain enforceable.'
     },
     {
       q: 'What cryptographic ciphers are utilized?',
@@ -151,10 +152,24 @@ export default function LandingPage() {
           <a href="#features">Features</a>
           <a href="#mobile">Mobile First</a>
           <a href="#faq">FAQ</a>
-          <a href={`${API}/docs`} target="_blank" rel="noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <a href={API_DOCS} target="_blank" rel="noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
             API Docs <ExternalLink size={12} />
           </a>
         </nav>
+
+        <details className="mobile-nav">
+          <summary aria-label="Open site navigation">
+            <Menu size={20} aria-hidden="true" />
+          </summary>
+          <nav className="mobile-nav-menu" aria-label="Mobile navigation">
+            <a href="#features">Features</a>
+            <a href="#architecture">Architecture</a>
+            <a href="#interactive-demo">Live Crypto</a>
+            <a href="#mobile">Android App</a>
+            <a href="#faq">FAQ</a>
+            <a href={API_DOCS} target="_blank" rel="noreferrer">API Docs</a>
+          </nav>
+        </details>
 
         <div className="nav-cta-group">
           <button className="btn-demo" onClick={handleDemoLogin} disabled={demoLoading}>
@@ -191,7 +206,7 @@ export default function LandingPage() {
         </p>
 
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 16, flexWrap: 'wrap' }}>
-          <button onClick={handleDemoLogin} className="btn-primary" style={{ padding: '12px 24px', fontSize: 15 }}>
+          <button onClick={handleDemoLogin} disabled={demoLoading} className="btn-primary" style={{ padding: '12px 24px', fontSize: 15 }}>
             <Sparkles size={16} /> Explore Live Interactive Workspace
           </button>
           <a href="#interactive-demo" className="btn-secondary" style={{ padding: '12px 24px', fontSize: 15 }}>
@@ -227,7 +242,7 @@ export default function LandingPage() {
             </button>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 20 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 320px), 1fr))', gap: 20 }}>
             <div style={{ background: 'var(--surface-raised)', padding: 18, borderRadius: 12, border: '1px solid var(--border)' }}>
               <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', display: 'block', marginBottom: 8 }}>
                 Input Plaintext Payload
@@ -302,7 +317,7 @@ export default function LandingPage() {
           </p>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 24 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 320px), 1fr))', gap: 24 }}>
           {/* Card 1: Client Device */}
           <div className="card" style={{ padding: 28, borderTop: '3px solid #3b82f6' }}>
             <div style={{ width: 42, height: 42, borderRadius: 10, background: 'rgba(59, 130, 246, 0.1)', color: '#60a5fa', display: 'grid', placeItems: 'center', marginBottom: 16 }}>
@@ -406,7 +421,7 @@ export default function LandingPage() {
 
       {/* 6. Mobile First Architecture */}
       <section id="mobile" style={{ maxWidth: 1240, margin: '80px auto', padding: '0 24px' }}>
-        <div style={{ background: 'linear-gradient(135deg, rgba(30, 58, 138, 0.4) 0%, rgba(17, 24, 39, 0.9) 100%)', border: '1px solid var(--border-subtle)', borderRadius: 20, padding: '48px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 36, alignItems: 'center' }}>
+        <div style={{ background: 'linear-gradient(135deg, rgba(30, 58, 138, 0.4) 0%, rgba(17, 24, 39, 0.9) 100%)', border: '1px solid var(--border-subtle)', borderRadius: 20, padding: 'clamp(20px, 5vw, 48px)', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 320px), 1fr))', gap: 36, alignItems: 'center' }}>
           <div>
             <span className="badge badge-blue" style={{ marginBottom: 12 }}>CROSS-PLATFORM MOBILE CLIENT</span>
             <h2 style={{ fontSize: 32, fontWeight: 800, marginBottom: 16 }}>
@@ -423,7 +438,7 @@ export default function LandingPage() {
                 <Check size={18} style={{ color: '#34d399' }} /> Secure hardware keychain key storage (Expo SecureStore)
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <Check size={18} style={{ color: '#34d399' }} /> Battery-aware & Wi-Fi-only background synchronization
+                <Check size={18} style={{ color: '#34d399' }} /> Persistent sync queue with Wi-Fi and battery preferences
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <Check size={18} style={{ color: '#34d399' }} /> Android APK build ready with EAS / Gradle configuration

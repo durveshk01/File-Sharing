@@ -1,11 +1,46 @@
-import io
 import os
+import hashlib
+import secrets
+import shutil
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from app.core.config import settings
+from app.file_service import content_disposition
 
 class StorageAdapter(ABC):
+    def check_health(self) -> None:
+        """Verify the storage service is reachable and configured."""
+        raise NotImplementedError
+
+    def copy(self, source: str, destination: str) -> None:
+        self.put(destination, self.get(source))
+
+    def size(self, key: str) -> int:
+        return len(self.get(key))
+
+    def iter_bytes(self, key: str, start: int = 0, end: int | None = None) -> Iterator[bytes]:
+        data = self.get(key)
+        yield data[start:end + 1 if end is not None else None]
+
+    def fingerprint(self, key: str) -> tuple[int, str]:
+        checksum = hashlib.sha256()
+        size = 0
+        for chunk in self.iter_bytes(key):
+            checksum.update(chunk)
+            size += len(chunk)
+        return size, checksum.hexdigest()
+
+    def read_bounded(self, key: str, maximum: int) -> bytes:
+        data = bytearray()
+        for chunk in self.iter_bytes(key):
+            if len(data) + len(chunk) > maximum:
+                raise ValueError("Stored ciphertext exceeds the authorized size")
+            data.extend(chunk)
+        if len(data) != maximum:
+            raise ValueError("Stored ciphertext size differs from metadata")
+        return bytes(data)
+
     @abstractmethod
     def put(self, key: str, data: bytes) -> None:
         """Store encrypted payload by key."""
@@ -28,7 +63,8 @@ class StorageAdapter(ABC):
 
     @abstractmethod
     def generate_presigned_upload(
-        self, object_key: str, content_type: str = "application/octet-stream", expires_in: int = 3600
+        self, object_key: str, content_type: str = "application/octet-stream", expires_in: int = 3600,
+        content_length: int | None = None,
     ) -> dict[str, Any]:
         """Generate direct upload authorization (S3 presigned PUT or direct raw endpoint)."""
         pass
@@ -78,7 +114,12 @@ class LocalStorage(StorageAdapter):
     def put(self, key: str, data: bytes) -> None:
         target = self._resolve(key)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
+        temporary = target.with_name(target.name + f".{secrets.token_hex(8)}.part")
+        try:
+            temporary.write_bytes(data)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def get(self, key: str) -> bytes:
         target = self._resolve(key)
@@ -91,10 +132,45 @@ class LocalStorage(StorageAdapter):
         target.unlink(missing_ok=True)
 
     def exists(self, key: str) -> bool:
-        return self._resolve(key).exists()
+        return self._resolve(key).is_file()
+
+    def check_health(self) -> None:
+        key = f"_health/{secrets.token_hex(16)}"
+        try:
+            self.put(key, b"storage probe")
+            if self.get(key) != b"storage probe":
+                raise OSError("Storage read/write check failed")
+        finally:
+            self.delete(key)
+
+    def copy(self, source: str, destination: str) -> None:
+        target = self._resolve(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(target.name + f".{secrets.token_hex(8)}.part")
+        try:
+            shutil.copyfile(self._resolve(source), temporary)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def size(self, key: str) -> int:
+        return self._resolve(key).stat().st_size
+
+    def iter_bytes(self, key: str, start: int = 0, end: int | None = None) -> Iterator[bytes]:
+        with self._resolve(key).open("rb") as stream:
+            stream.seek(start)
+            remaining = end - start + 1 if end is not None else None
+            while remaining is None or remaining > 0:
+                chunk = stream.read(min(64 * 1024, remaining) if remaining is not None else 64 * 1024)
+                if not chunk:
+                    break
+                if remaining is not None:
+                    remaining -= len(chunk)
+                yield chunk
 
     def generate_presigned_upload(
-        self, object_key: str, content_type: str = "application/octet-stream", expires_in: int = 3600
+        self, object_key: str, content_type: str = "application/octet-stream", expires_in: int = 3600,
+        content_length: int | None = None,
     ) -> dict[str, Any]:
         return {
             "mode": "direct_backend",
@@ -174,7 +250,11 @@ class S3Storage(StorageAdapter):
             kwargs["aws_access_key_id"] = access_key_id
             kwargs["aws_secret_access_key"] = secret_access_key
 
+        kwargs["config"] = Config(connect_timeout=5, read_timeout=30, retries={"max_attempts": 2, "mode": "standard"})
         self.client = boto3.client("s3", **kwargs)
+
+    def check_health(self) -> None:
+        self.client.head_bucket(Bucket=self.bucket_name)
 
     def put(self, key: str, data: bytes) -> None:
         self.client.put_object(
@@ -188,7 +268,11 @@ class S3Storage(StorageAdapter):
         from botocore.exceptions import ClientError
         try:
             resp = self.client.get_object(Bucket=self.bucket_name, Key=key)
-            return resp["Body"].read()
+            body = resp["Body"]
+            try:
+                return body.read()
+            finally:
+                body.close()
         except ClientError as e:
             if e.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
                 raise FileNotFoundError(f"Storage object not found in S3: {key}") from e
@@ -202,15 +286,39 @@ class S3Storage(StorageAdapter):
         try:
             self.client.head_object(Bucket=self.bucket_name, Key=key)
             return True
-        except ClientError:
-            return False
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in {"NoSuchKey", "404", "NotFound"}:
+                return False
+            raise
+
+    def copy(self, source: str, destination: str) -> None:
+        self.client.copy_object(Bucket=self.bucket_name, Key=destination,
+                                CopySource={"Bucket": self.bucket_name, "Key": source})
+
+    def size(self, key: str) -> int:
+        return self.client.head_object(Bucket=self.bucket_name, Key=key)["ContentLength"]
+
+    def iter_bytes(self, key: str, start: int = 0, end: int | None = None) -> Iterator[bytes]:
+        params = {"Bucket": self.bucket_name, "Key": key}
+        if start or end is not None:
+            params["Range"] = f"bytes={start}-{end if end is not None else ''}"
+        response = self.client.get_object(**params)
+        body = response["Body"]
+        try:
+            yield from body.iter_chunks(chunk_size=64 * 1024)
+        finally:
+            body.close()
 
     def generate_presigned_upload(
-        self, object_key: str, content_type: str = "application/octet-stream", expires_in: int = 3600
+        self, object_key: str, content_type: str = "application/octet-stream", expires_in: int = 3600,
+        content_length: int | None = None,
     ) -> dict[str, Any]:
+        params = {"Bucket": self.bucket_name, "Key": object_key, "ContentType": content_type}
+        if content_length is not None:
+            params["ContentLength"] = content_length
         url = self.client.generate_presigned_url(
             "put_object",
-            Params={"Bucket": self.bucket_name, "Key": object_key, "ContentType": content_type},
+            Params=params,
             ExpiresIn=expires_in,
         )
         return {
@@ -226,7 +334,7 @@ class S3Storage(StorageAdapter):
     ) -> dict[str, Any]:
         params = {"Bucket": self.bucket_name, "Key": object_key}
         if filename:
-            params["ResponseContentDisposition"] = f'attachment; filename="{filename.replace(chr(34), "")}"'
+            params["ResponseContentDisposition"] = content_disposition(filename)
         url = self.client.generate_presigned_url(
             "get_object",
             Params=params,

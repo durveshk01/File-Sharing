@@ -1,5 +1,9 @@
 'use client';
 
+import { API } from '../api';
+import DeviceManager from '../components/device-manager';
+import { apiRequest, clearBrowserSession } from '../lib/api';
+
 import { FormEvent, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -19,11 +23,10 @@ import {
   AlertCircle
 } from 'lucide-react';
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
 
 export default function SecurityPage() {
   const [sessions, setSessions] = useState<any[]>([]);
-  const [devices, setDevices] = useState<any[]>([]);
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
   const [twoFactorEnabled, setTwoFactorEnabled] = useState(false);
@@ -39,24 +42,23 @@ export default function SecurityPage() {
   const router = useRouter();
 
   async function load() {
-    const r = await fetch(`${API}/api/auth/sessions`, { credentials: 'include' });
-    if (r.status === 401) {
-      router.replace('/login');
-      return;
-    } else if (r.ok) {
-      setSessions(await r.json());
+    try {
+      const [r, twoFaRes] = await Promise.all([
+        fetch(`${API}/api/auth/sessions`, { credentials: 'include' }),
+        fetch(`${API}/api/auth/2fa/status`, { credentials: 'include' }),
+      ]);
+      if (r.status === 401 || twoFaRes.status === 401) {
+        router.replace('/login');
+        return;
+      }
+      if (!r.ok || !twoFaRes.ok) throw new Error('Could not load security settings. Try again.');
+      const [sessionData, twoFaData] = await Promise.all([r.json(), twoFaRes.json()]);
+      setSessions(sessionData.filter((session: { expires_at: string }) => new Date(session.expires_at) > new Date()));
+      setTwoFactorEnabled(twoFaData.enabled);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Could not load security settings. Try again.');
     }
 
-    const twoFaRes = await fetch(`${API}/api/auth/2fa/status`, { credentials: 'include' });
-    if (twoFaRes.ok) {
-      const data = await twoFaRes.json();
-      setTwoFactorEnabled(data.enabled);
-    }
-
-    const devRes = await fetch(`${API}/api/sync/devices`, { credentials: 'include' });
-    if (devRes.ok) {
-      setDevices(await devRes.json());
-    }
   }
 
   useEffect(() => {
@@ -67,52 +69,49 @@ export default function SecurityPage() {
     e.preventDefault();
     setMsg('');
     setErr('');
-    const body = Object.fromEntries(new FormData(e.currentTarget));
-    const r = await fetch(`${API}/api/auth/change-password`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (r.ok) {
+    try {
+      const body = Object.fromEntries(new FormData(e.currentTarget));
+      const r = await fetch(`${API}/api/auth/change-password`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const response = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(response.detail || 'Could not update password. Try again.');
       setMsg('Password updated successfully. All other active sessions have been revoked.');
       (e.target as HTMLFormElement).reset();
-      load();
-    } else {
-      const b = await r.json();
-      setErr(b.detail || 'Could not update password');
+      await load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Could not update password. Try again.');
     }
   }
 
   async function revokeSessions() {
-    if (!confirm('Revoke all other active sessions? You will need to log back in.')) return;
-    await fetch(`${API}/api/auth/sessions`, { method: 'DELETE', credentials: 'include' });
-    router.replace('/login');
-  }
-
-  async function revokeDevice(deviceId: string, deviceName: string) {
-    if (!confirm(`Revoke device "${deviceName}"? It will no longer be authorized to sync files.`)) return;
+    if (!confirm('Revoke all sessions, including this one? You will be signed out.')) return;
     try {
-      await fetch(`${API}/api/sync/devices/${deviceId}`, { method: 'DELETE', credentials: 'include' });
-      setDevices((prev) => prev.filter((d) => d.id !== deviceId));
-      setMsg(`Device "${deviceName}" revoked successfully.`);
-    } catch {
-      setErr('Could not revoke device');
+      const response = await fetch(`${API}/api/auth/sessions`, { method: 'DELETE', credentials: 'include' });
+      if (!response.ok) throw new Error('Could not revoke sessions. Try again.');
+      clearBrowserSession();
+      router.replace('/login');
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Could not revoke sessions. Try again.');
     }
   }
 
   async function start2FASetup() {
     setMsg('');
     setErr('');
-    const r = await fetch(`${API}/api/auth/2fa/setup`, {
-      method: 'POST',
-      credentials: 'include',
-    });
-    if (r.ok) {
-      const data = await r.json();
+    try {
+      const r = await fetch(`${API}/api/auth/2fa/setup`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.detail || 'Could not initialize 2FA setup. Try again.');
       setTwoFactorSetup(data);
-    } else {
-      setErr('Could not initialize 2FA setup');
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Could not initialize 2FA setup. Try again.');
     }
   }
 
@@ -120,20 +119,21 @@ export default function SecurityPage() {
     e.preventDefault();
     setMsg('');
     setErr('');
-    const r = await fetch(`${API}/api/auth/2fa/enable`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: totpCode }),
-    });
-    if (r.ok) {
+    try {
+      const r = await fetch(`${API}/api/auth/2fa/enable`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: totpCode }),
+      });
+      const errorData = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(errorData.detail || 'Invalid verification code');
       setTwoFactorEnabled(true);
       setTwoFactorSetup(null);
       setTotpCode('');
       setMsg('Two-factor authentication (TOTP) successfully activated!');
-    } else {
-      const errorData = await r.json();
-      setErr(errorData.detail || 'Invalid verification code');
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Could not enable 2FA. Try again.');
     }
   }
 
@@ -141,27 +141,28 @@ export default function SecurityPage() {
     e.preventDefault();
     setMsg('');
     setErr('');
-    const r = await fetch(`${API}/api/auth/2fa/disable`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: disablePassword, code: disableCode }),
-    });
-    if (r.ok) {
+    try {
+      const r = await fetch(`${API}/api/auth/2fa/disable`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: disablePassword, code: disableCode }),
+      });
+      const errorData = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(errorData.detail || 'Could not disable 2FA. Try again.');
       setTwoFactorEnabled(false);
       setShowDisableForm(false);
       setDisablePassword('');
       setDisableCode('');
       setMsg('Two-factor authentication has been disabled.');
-    } else {
-      const errorData = await r.json();
-      setErr(errorData.detail || 'Could not disable 2FA');
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Could not disable 2FA. Try again.');
     }
   }
 
   async function logout() {
-    await fetch(`${API}/api/auth/logout`, { method: 'POST', credentials: 'include' });
-    router.replace('/');
+    try { await apiRequest('/api/auth/logout', { method: 'POST' }); clearBrowserSession(); router.replace('/'); }
+    catch (error) { setErr(error instanceof Error ? error.message : 'Could not sign out'); }
   }
 
   return (
@@ -223,11 +224,11 @@ export default function SecurityPage() {
           </div>
 
           {msg && (
-            <div style={{ padding: 12, borderRadius: 8, background: '#ecfdf5', color: '#065f46', border: '1px solid #a7f3d0', marginBottom: 18, fontSize: 13 }}>
+            <div role="status" aria-live="polite" style={{ padding: 12, borderRadius: 8, background: '#ecfdf5', color: '#065f46', border: '1px solid #a7f3d0', marginBottom: 18, fontSize: 13 }}>
               {msg}
             </div>
           )}
-          {err && <div className="auth-error" style={{ marginBottom: 18 }}>{err}</div>}
+          {err && <div className="auth-error" role="alert" style={{ marginBottom: 18 }}>{err}</div>}
 
           <div style={{ maxWidth: 840, display: 'grid', gap: 24 }}>
             {/* 2FA Panel */}
@@ -245,7 +246,7 @@ export default function SecurityPage() {
 
               {twoFactorEnabled ? (
                 <div>
-                  <p style={{ fontSize: 13, color: '#334155', lineHeight: 1.6 }}>
+                  <p style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
                     Your account is protected with time-based one-time passwords (TOTP). Signing in requires your password plus an authenticator token.
                   </p>
                   {!showDisableForm ? (
@@ -259,8 +260,9 @@ export default function SecurityPage() {
                   ) : (
                     <form onSubmit={disable2FA} style={{ marginTop: 16, maxWidth: 440 }}>
                       <div className="field">
-                        <label>Confirm Account Password</label>
+                        <label htmlFor="disable-password">Confirm Account Password</label>
                         <input
+                          id="disable-password"
                           type="password"
                           required
                           value={disablePassword}
@@ -268,8 +270,9 @@ export default function SecurityPage() {
                         />
                       </div>
                       <div className="field">
-                        <label>6-Digit Authenticator Code or Recovery Code</label>
+                        <label htmlFor="disable-code">6-Digit Authenticator Code or Recovery Code</label>
                         <input
+                          id="disable-code"
                           type="text"
                           required
                           placeholder="123456 or a1b2c3d4"
@@ -290,12 +293,12 @@ export default function SecurityPage() {
                 </div>
               ) : twoFactorSetup ? (
                 <div style={{ marginTop: 10 }}>
-                  <div style={{ background: '#eff6ff', padding: 14, borderRadius: 8, border: '1px solid #bfdbfe', marginBottom: 16 }}>
-                    <strong style={{ fontSize: 13, color: '#1e40af' }}>Step 1: Link Authenticator App</strong>
-                    <p style={{ fontSize: 12, color: '#1e3a8a', margin: '4px 0 10px' }}>
+                  <div style={{ background: 'var(--primary-subtle)', padding: 14, borderRadius: 8, border: '1px solid var(--border)', marginBottom: 16 }}>
+                    <strong style={{ fontSize: 13, color: 'var(--text-primary)' }}>Step 1: Link Authenticator App</strong>
+                    <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '4px 0 10px' }}>
                       Add this secret key to your authenticator app (Google Authenticator, Authy, 1Password):
                     </p>
-                    <code style={{ display: 'inline-block', padding: '6px 12px', background: '#fff', borderRadius: 6, border: '1px solid #cbd5e1', fontFamily: 'monospace', fontSize: 14, letterSpacing: 1.5, color: '#2563eb' }}>
+                    <code style={{ display: 'inline-block', padding: '6px 12px', background: 'var(--surface)', borderRadius: 6, border: '1px solid var(--border)', fontFamily: 'monospace', fontSize: 14, letterSpacing: 1.5, color: 'var(--text-primary)' }}>
                       {twoFactorSetup.secret}
                     </code>
                     <div style={{ marginTop: 8, fontSize: 11, color: '#64748b', wordBreak: 'break-all' }}>
@@ -303,14 +306,14 @@ export default function SecurityPage() {
                     </div>
                   </div>
 
-                  <div style={{ background: '#f8fafc', padding: 14, borderRadius: 8, border: '1px solid #e2e8f0', marginBottom: 16 }}>
-                    <strong style={{ fontSize: 13, color: '#0f172a' }}>Step 2: Save Emergency Recovery Codes</strong>
+                  <div style={{ background: 'var(--surface-raised)', padding: 14, borderRadius: 8, border: '1px solid var(--border)', marginBottom: 16 }}>
+                    <strong style={{ fontSize: 13, color: 'var(--text-primary)' }}>Step 2: Save Emergency Recovery Codes</strong>
                     <p style={{ fontSize: 11, color: '#64748b', margin: '4px 0 10px' }}>
                       Keep these single-use codes stored in a password manager. They can restore access if you lose your device.
                     </p>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(85px, 1fr))', gap: 8 }}>
                       {twoFactorSetup.recovery_codes.map((code, idx) => (
-                        <code key={idx} style={{ background: '#fff', padding: '4px 6px', borderRadius: 4, border: '1px solid #cbd5e1', fontSize: 12, textAlign: 'center' }}>
+                        <code key={idx} style={{ background: 'var(--surface)', color: 'var(--text-primary)', padding: '4px 6px', borderRadius: 4, border: '1px solid var(--border)', fontSize: 12, textAlign: 'center' }}>
                           {code}
                         </code>
                       ))}
@@ -319,8 +322,9 @@ export default function SecurityPage() {
 
                   <form onSubmit={confirm2FA} style={{ maxWidth: 440 }}>
                     <div className="field">
-                      <label>Step 3: Enter 6-Digit Code from Authenticator</label>
+                      <label htmlFor="setup-code">Step 3: Enter 6-Digit Code from Authenticator</label>
                       <input
+                        id="setup-code"
                         type="text"
                         maxLength={6}
                         placeholder="123456"
@@ -370,60 +374,12 @@ export default function SecurityPage() {
               </form>
             </div>
 
-            {/* Registered Devices Panel */}
-            <div className="panel" style={{ marginBottom: 20 }}>
-              <div className="panel-title">
-                <h3>Registered Synchronization Devices ({devices.length})</h3>
-                <span className="badge badge-info">Delta Sync Enabled</span>
-              </div>
-              {devices.length === 0 ? (
-                <div style={{ color: '#64748b', fontSize: 12, padding: '12px 0' }}>
-                  No standalone mobile or desktop devices registered yet. Connect the SecureShare mobile app to sync offline.
-                </div>
-              ) : (
-                <div style={{ display: 'grid', gap: 8 }}>
-                  {devices.map((d) => (
-                    <div
-                      key={d.id}
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        padding: '12px 14px',
-                        borderRadius: 8,
-                        background: '#f8fafc',
-                        border: '1px solid #e2e8f0',
-                        fontSize: 12,
-                      }}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                        <div style={{ width: 32, height: 32, borderRadius: 8, background: '#eff6ff', color: '#2563eb', display: 'grid', placeItems: 'center' }}>
-                          <Smartphone size={16} />
-                        </div>
-                        <div>
-                          <strong style={{ color: '#0f172a' }}>{d.device_name}</strong>
-                          <div style={{ color: '#64748b', fontSize: 11, marginTop: 2 }}>
-                            Type: {d.device_type} • Last active: {new Date(d.last_seen_at).toLocaleString()}
-                          </div>
-                        </div>
-                      </div>
-                      <button
-                        onClick={() => revokeDevice(d.id, d.device_name)}
-                        className="btn-outline btn-sm"
-                        style={{ color: '#dc2626', borderColor: '#fca5a5' }}
-                      >
-                        Revoke Access
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+            <DeviceManager />
 
             {/* Active Sessions Panel */}
             <div className="panel">
               <div className="panel-title">
-                <h3>Active Browser Sessions ({sessions.length})</h3>
+                <h3>Active sessions ({sessions.length})</h3>
                 <button
                   className="btn-outline btn-sm"
                   style={{ color: '#dc2626', borderColor: '#fca5a5' }}
@@ -443,13 +399,13 @@ export default function SecurityPage() {
                       alignItems: 'center',
                       padding: '10px 14px',
                       borderRadius: 8,
-                      background: '#f8fafc',
-                      border: '1px solid #e2e8f0',
+                      background: 'var(--surface-raised)',
+                      border: '1px solid var(--border)',
                       fontSize: 12,
                     }}
                   >
                     <div>
-                      <strong style={{ color: '#0f172a' }}>Authenticated Session</strong>
+                      <strong style={{ color: 'var(--text-primary)' }}>Authenticated Session</strong>
                       <div style={{ color: '#64748b', fontSize: 11, marginTop: 2 }}>
                         Expires: {new Date(s.expires_at).toLocaleString()}
                       </div>

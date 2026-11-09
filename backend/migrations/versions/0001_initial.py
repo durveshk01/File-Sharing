@@ -12,6 +12,7 @@ def upgrade():
     bind = op.get_bind()
     insp = sa.inspect(bind)
     tables = set(insp.get_table_names())
+    false = sa.text("false" if bind.dialect.name == "postgresql" else "0")
 
     # 1. users
     if "users" not in tables:
@@ -23,7 +24,7 @@ def upgrade():
             sa.Column("password_hash", sa.String(512), nullable=False),
             sa.Column("verified_at", sa.DateTime(timezone=True), nullable=True),
             sa.Column("totp_secret", sa.String(64), nullable=True),
-            sa.Column("totp_enabled", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+            sa.Column("totp_enabled", sa.Boolean(), nullable=False, server_default=false),
             sa.Column("recovery_codes_hash", sa.Text(), nullable=True),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         )
@@ -35,7 +36,7 @@ def upgrade():
         if "totp_secret" not in cols:
             op.add_column("users", sa.Column("totp_secret", sa.String(64), nullable=True))
         if "totp_enabled" not in cols:
-            op.add_column("users", sa.Column("totp_enabled", sa.Boolean(), nullable=False, server_default=sa.text("0")))
+            op.add_column("users", sa.Column("totp_enabled", sa.Boolean(), nullable=False, server_default=false))
         if "recovery_codes_hash" not in cols:
             op.add_column("users", sa.Column("recovery_codes_hash", sa.Text(), nullable=True))
 
@@ -76,7 +77,7 @@ def upgrade():
             sa.Column("expires_at", sa.DateTime(timezone=True)),
             sa.Column("max_downloads", sa.Integer()),
             sa.Column("downloads", sa.Integer(), nullable=False, server_default=sa.text("0")),
-            sa.Column("revoked", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+            sa.Column("revoked", sa.Boolean(), nullable=False, server_default=false),
             sa.Column("password_hash", sa.String(512)),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         )
@@ -112,7 +113,7 @@ def upgrade():
             sa.Column("id", sa.String(36), primary_key=True),
             sa.Column("user_id", sa.String(36), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
             sa.Column("message", sa.String(280), nullable=False),
-            sa.Column("read", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+            sa.Column("read", sa.Boolean(), nullable=False, server_default=false),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         )
         op.create_index("ix_notifications_user_id", "notifications", ["user_id"])
@@ -125,7 +126,7 @@ def upgrade():
             sa.Column("user_id", sa.String(36), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
             sa.Column("purpose", sa.String(24), nullable=False),
             sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
-            sa.Column("used", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+            sa.Column("used", sa.Boolean(), nullable=False, server_default=false),
         )
         op.create_index("ix_one_time_tokens_user_id", "one_time_tokens", ["user_id"])
         op.create_index("ix_one_time_tokens_purpose", "one_time_tokens", ["purpose"])
